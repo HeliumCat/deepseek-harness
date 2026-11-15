@@ -231,6 +231,7 @@ export const SERVICE_WALK_EXEMPTIONS: Record<string, string> = {
   sidebarRightTabs: 'client-side right-Sidebar tab-type registry — packages/client/ui-sidebar-right/README.md owns the API',
   forgeChanges: 'client-side changes view face for other plugins — docs/subsystems/forge.md#extension-api owns the API',
   documentPreviews: 'client-side document renderer registry — docs/subsystems/sidebar-right.md owns the API',
+  petWorker: 'bundle-local delegation service mounted only by the pet profile — packages/bundle/pet-app/README.md owns the API',
 }
 
 /**

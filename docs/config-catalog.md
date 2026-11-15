@@ -2770,6 +2770,42 @@ export interface Config {
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-persona -->
 
+<!-- BEGIN GENERATED config-catalog:@deepseek-ai/dsh-pet-app -->
+<a id="deepseek-aidsh-pet-app"></a>
+
+## `@deepseek-ai/dsh-pet-app`
+
+- `inject`: `webServer` · `agents` · `agentPresets` · `agentDefaultModel` · `sessions` · `sessionPersistence` · `subagents`
+- `source`: [`packages/bundle/pet-app/src/index.ts:34`](../packages/bundle/pet-app/src/index.ts)
+
+```ts config-catalog
+/** Pet worker configuration, changeable from the profile patch. */
+export interface Config {
+  /** Absolute directory worker sessions run in. */
+  workspace: string
+  /** Absolute directory holding the capped history. */
+  historyRoot: string
+  /** Maximum retained delegations. @default 1000 */
+  historyLimit: number
+  /** Agent preset mounted for the worker main agent. @default 'pet-worker' */
+  presetId: string
+  /** Absolute MCP endpoint path. @default '/pet/mcp' */
+  mcpPath: string
+  /** Absolute pet page path. @default '/pet' */
+  pagePath: string
+  /** Absolute file storing the pet access token. */
+  tokenFile: string
+  /** Viewer opened after readiness. @default 'auto' */
+  windowMode: WindowMode
+  /** Explicit Electron executable or package directory; otherwise auto-resolved. */
+  electronPath?: string
+}
+
+/** Which viewer the worker opens after readiness. */
+export type WindowMode = 'auto' | 'electron' | 'browser' | 'none'
+```
+<!-- END GENERATED config-catalog:@deepseek-ai/dsh-pet-app -->
+
 <!-- BEGIN GENERATED config-catalog:@deepseek-ai/dsh-plan-mode -->
 <a id="deepseek-aidsh-plan-mode"></a>
 

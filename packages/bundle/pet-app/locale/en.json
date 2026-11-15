@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Pet worker",
+    "description": "Run a resident delegation worker and a transparent desktop pet over a local MCP server."
+  }
+}

@@ -1,10 +1,9 @@
 /** Generate paired CLI references by invoking the shipped launcher and profile help. */
 
-import { execFile } from 'node:child_process'
+import { spawn, type ChildProcess } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { promisify } from 'node:util'
 import { PROFILE_TEMPLATES } from '@deepseek-ai/dsh-official-bundles'
 import {
   computeTranslationPairingRecord,
@@ -16,7 +15,91 @@ import { defaultParallelism } from './parallelism.ts'
 
 const root = resolve(import.meta.dirname, '..')
 const paths = translationPairPaths('docs/cli-help.md')
-const execFileAsync = promisify(execFile)
+
+// Source-mode profile boots can exceed 30 s on slow development machines;
+// the cap is a safety net, not a performance target, and fast boots exit
+// long before it on CI.
+const HELP_TIMEOUT_MS = 180_000
+const HELP_MAX_BUFFER = 2 * 1024 * 1024
+
+/**
+ * Run one help invocation with stdin closed, so stdin-lifetime apps (the ACP
+ * bridge's `exitOnStdinEnd`) print help and exit instead of waiting for EOF.
+ * The promisified `execFile` cannot provide that: it ignores `stdio` and
+ * `input` and keeps the child's stdin pipe open on every platform.
+ * @param args - launcher arguments before the appended `--help`.
+ * @param cwd - invoking directory.
+ * @param env - child environment.
+ * @param signal - abort closes the child with SIGKILL before this settles.
+ * @returns the invocation's complete stdout.
+ */
+function runHelp(args: readonly string[], cwd: string, env: NodeJS.ProcessEnv, signal: AbortSignal): Promise<string> {
+  return new Promise((resolvePromise, rejectPromise) => {
+    if (signal.aborted) {
+      rejectPromise(new Error(`aborted before starting ${['dsh', ...args].join(' ')} --help`))
+      return
+    }
+    let child: ChildProcess
+    try {
+      child = spawn(process.execPath, ['--import', 'tsx/esm', 'apps/cli/src/bin.ts', ...args, '--help'], {
+        cwd, env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
+      })
+    } catch (error) {
+      rejectPromise(error instanceof Error ? error : new Error(String(error)))
+      return
+    }
+    let stdout = ''
+    let stderr = ''
+    let settled = false
+    const settle = (error?: Error, value = ''): void => {
+      if (settled) return
+      settled = true
+      if (error === undefined) resolvePromise(value)
+      else rejectPromise(error)
+    }
+    const output = child.stdout
+    const diagnostics = child.stderr
+    if (output === null || diagnostics === null) {
+      child.kill('SIGKILL')
+      settle(new Error(`${['dsh', ...args].join(' ')} --help has no piped output streams`))
+      return
+    }
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL')
+      settle(new Error(`${['dsh', ...args].join(' ')} --help timed out after ${HELP_TIMEOUT_MS} ms`))
+    }, HELP_TIMEOUT_MS)
+    const abort = (): void => { child.kill('SIGKILL') }
+    signal.addEventListener('abort', abort, { once: true })
+    output.setEncoding('utf8').on('data', (chunk: string) => {
+      stdout += chunk
+      if (stdout.length + stderr.length > HELP_MAX_BUFFER) {
+        child.kill('SIGKILL')
+        settle(new Error(`${['dsh', ...args].join(' ')} --help exceeded the ${HELP_MAX_BUFFER}-byte output cap`))
+      }
+    })
+    diagnostics.setEncoding('utf8').on('data', (chunk: string) => { stderr += chunk })
+    child.once('error', (error: Error) => { settle(error) })
+    child.once('exit', (code, killedSignal) => {
+      clearTimeout(timer)
+      signal.removeEventListener('abort', abort)
+      if (killedSignal === 'SIGKILL') {
+        // The timer or an abort killed the child; the timer settles itself,
+        // and an aborted read must settle here so close() can wait it out.
+        if (signal.aborted) settle(new Error(`aborted ${['dsh', ...args].join(' ')} --help`))
+        return
+      }
+      if (code !== 0) {
+        settle(new Error(`${['dsh', ...args].join(' ')} --help exited ${String(code)}${stderr === '' ? '' : `: ${stderr.trim()}`}`))
+        return
+      }
+      if (stderr !== '') {
+        settle(new Error(`${['dsh', ...args].join(' ')} --help wrote diagnostics: ${stderr}`))
+        return
+      }
+      settle(undefined, stdout)
+    })
+  })
+}
 
 /** Complete help text and the immediate subcommands it advertises. */
 export interface CliHelp {
@@ -208,22 +291,7 @@ async function collectHelp(): Promise<HelpPage[]> {
       NO_COLOR: '1',
     }
     for (const name of ['NODE_OPTIONS', 'FORCE_COLOR']) Reflect.deleteProperty(environment, name)
-    const help = execFileAsync(process.execPath, [
-      '--import', 'tsx/esm', 'apps/cli/src/bin.ts', ...args, '--help',
-    ], {
-      cwd: root, env: environment, encoding: 'utf8', timeout: 30_000,
-      killSignal: 'SIGKILL', maxBuffer: 2 * 1024 * 1024,
-    })
-    // Killing directly, not through execFile's signal option, settles the read only after the child closes.
-    const abort = (): void => { help.child.kill('SIGKILL') }
-    signal.addEventListener('abort', abort, { once: true })
-    try {
-      const { stdout, stderr } = await help
-      if (stderr !== '') throw new Error(`${['dsh', ...args].join(' ')} --help wrote diagnostics: ${stderr}`)
-      return stdout
-    } finally {
-      signal.removeEventListener('abort', abort)
-    }
+    return runHelp(args, root, environment, signal)
   }, topLevelHelpArgs(profiles), concurrency)
   try {
     return await collectCliHelp(reader.readHelp, profiles)

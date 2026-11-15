@@ -1,10 +1,10 @@
 /** Command discovery and complete output preservation for the CLI reference. */
 
-import { execFile } from 'node:child_process'
+import { spawn } from 'node:child_process'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cliHelpConcurrency, collectCliHelp, main, parseCliHelp, prefetchHelp, topLevelHelpArgs } from './gen-cli-help.ts'
 
-vi.mock('node:child_process', () => ({ execFile: vi.fn() }))
+vi.mock('node:child_process', () => ({ spawn: vi.fn() }))
 afterEach(() => { vi.unstubAllEnvs(); vi.clearAllMocks() })
 
 interface PendingRead {
@@ -43,7 +43,7 @@ describe('CLI help child budget', () => {
   it.each(['0', '-1', '1.5', '2workers', '02', '9007199254740992'])('rejects %j before spawning help', async (raw) => {
     vi.stubEnv('DSH_CLI_HELP_CONCURRENCY', raw)
     await expect(main()).rejects.toThrow('DSH_CLI_HELP_CONCURRENCY must be a positive integer')
-    expect(execFile).not.toHaveBeenCalled()
+    expect(spawn).not.toHaveBeenCalled()
   })
 })
 

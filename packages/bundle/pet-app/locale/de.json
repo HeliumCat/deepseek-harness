@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Pet-Worker",
+    "description": "Führt einen dauerhaften Delegations-Worker und ein transparentes Desktop-Maskottchen über einen lokalen MCP-Server aus."
+  }
+}

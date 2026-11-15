@@ -1,0 +1,93 @@
+# The dsh pet-worker application: the worker service, its one preset, and the
+# viewer handoff over the dsh-web-app surface. The profile stacks
+# `@deepseek-ai/dsh-base`, `@deepseek-ai/dsh-web-app`, and this bundle; this
+# patch replaces the web runtime's browser handoff so the worker opens only the
+# pet window and prints the pet/MCP URLs itself.
+
+- insert:
+    # The worker service, its capped history, the pet page/API, and the
+    # localhost MCP endpoint. `workspace` is the directory worker sessions run
+    # in; `historyRoot` and `tokenFile` live under the Harness home.
+    - id: pet-worker
+      name: '@deepseek-ai/dsh-pet-app'
+      config:
+        workspace: !!js process.cwd()
+        historyRoot: !!js dshHomePath('pet', 'history')
+        historyLimit: 1000
+        presetId: pet-worker
+        mcpPath: /pet/mcp
+        pagePath: /pet
+        tokenFile: !!js dshHomePath('pet', 'token')
+        windowMode: auto
+
+    # The delegation-only worker preset. It has no file, shell, or web tools:
+    # the main agent analyzes the delegation and spawns a standard coding
+    # subagent for every assignment.
+    - id: preset-pet-worker
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: pet-worker
+        name: Pet worker
+        description: Delegation-only worker that turns a Codex call into DSH subagents.
+        order: 90
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: |
+                You are the DeepSeek Harness pet worker's delegation agent. You do not edit files, run shell commands, browse,
+                or do the delegated work yourself; your only job is to turn one Codex delegation into one or more subagent
+                runs and report the result.
+
+                Every user message is a delegation envelope from Codex with a Task, Acceptance criteria, and Expected return.
+
+                - Break the task into independent, self-contained subagent assignments. Prefer one subagent for a coherent
+                  task; split only when the parts can run independently.
+                - Call `subagent` once per assignment. Its `prompt` must carry everything the child needs: the goal,
+                  constraints, relevant paths or context, and exactly what to return. Use a 3-5 word `description`.
+                - After every subagent finishes, compare the outputs against the acceptance criteria. Do not accept a result
+                  that is missing required evidence or only claims success.
+                - Call `pet_acceptance` exactly once with `accepted` and `notes` before your final reply.
+                - Reply with only the content the Expected return asks for. Include concrete paths and verification evidence.
+                  When the criteria are not met, state what is missing and why.
+
+                No human is attached to this worker. Do not ask questions; delegate what is needed and report the outcome.
+          - id: delegation
+            name: cordis:group
+            group: true
+            isolate:
+              workflowEngine: true
+            config:
+              - id: tool-subagent
+                name: '@deepseek-ai/dsh-tool-subagent'
+                config:
+                  provider: spawn
+                  toolName: subagent
+                  agentPreset: standard
+              - id: pet-acceptance
+                name: '@deepseek-ai/dsh-pet-app/acceptance'
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+              toolResultPruner: true
+            config:
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'
+              - id: tool-result-pruner
+                name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+                config:
+                  thresholdChars: 8192
+                  headChars: 4096
+                  tailChars: 1024
+
+# The pet window, not the full Web UI, is the surface this profile opens.
+# Values omitted here would fall back to the web-app row, so restate the ones
+# this layer keeps.
+- id: web-runtime
+  config:
+    publicUrl: !!js ctx.webStartup.publicUrl
+    surfaceContext: true
+    openBrowser: false
+    printUrl: false

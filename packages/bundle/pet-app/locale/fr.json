@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Worker mascotte",
+    "description": "Exécute un worker de délégation résident et une mascotte de bureau transparente sur un serveur MCP local."
+  }
+}

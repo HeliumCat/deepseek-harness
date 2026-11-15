@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DSH Pet</title>
+  <link rel="stylesheet" href="./assets/pet.css">
+</head>
+<body>
+  <main id="app" class="app" data-state="loading">
+    <section class="stage" id="stage" aria-label="Desktop pet">
+      <div class="halo"></div>
+      <div class="orbits" id="orbits"></div>
+      <div class="pet" id="pet">
+        <div class="pet-scale">
+          <div class="pet-body">
+            <div class="antenna"><i></i></div>
+            <div class="ear left"></div>
+            <div class="ear right"></div>
+            <div class="face">
+              <div class="eye left"><b></b></div>
+              <div class="eye right"><b></b></div>
+              <div class="cheek left"></div>
+              <div class="cheek right"></div>
+              <div class="mouth"></div>
+            </div>
+            <div class="belly"></div>
+            <div class="tail"></div>
+          </div>
+          <div class="pet-shadow"></div>
+        </div>
+        <div class="bubble" id="bubble" hidden></div>
+      </div>
+    </section>
+
+    <nav class="toolbar">
+      <button id="history-button" class="chip" type="button">
+        <span class="chip-icon">◷</span><span data-i18n="history">History</span>
+        <span id="history-count" class="count">0</span>
+      </button>
+      <button id="config-button" class="chip square" type="button" title="MCP configuration" aria-label="MCP configuration">⚙</button>
+    </nav>
+
+    <section id="panel" class="panel" hidden>
+      <header class="panel-head">
+        <div class="panel-identity">
+          <span id="panel-icon" class="panel-icon">🐳</span>
+          <div>
+            <h1 id="panel-name">Subagent</h1>
+            <p id="panel-meta"></p>
+          </div>
+        </div>
+        <button id="panel-close" class="close" type="button" aria-label="Close">×</button>
+      </header>
+      <div class="tabs" role="tablist">
+        <button class="tab active" data-tab="overview" type="button">Overview</button>
+        <button class="tab" data-tab="run" type="button">Run</button>
+        <button class="tab" data-tab="result" type="button">Result</button>
+      </div>
+      <div class="panel-body" id="panel-body"></div>
+    </section>
+
+    <section id="history-view" class="panel history" hidden>
+      <header class="panel-head">
+        <div class="panel-identity">
+          <span class="panel-icon">◷</span>
+          <div><h1>Delegation history</h1><p id="history-meta"></p></div>
+        </div>
+        <button id="history-close" class="close" type="button" aria-label="Close">×</button>
+      </header>
+      <div class="history-search"><input id="history-filter" type="search" placeholder="Filter by conversation or task"></div>
+      <div class="panel-body" id="history-body"></div>
+    </section>
+
+    <section id="config-view" class="panel config" hidden>
+      <header class="panel-head">
+        <div class="panel-identity">
+          <span class="panel-icon">⚙</span>
+          <div><h1>Connect Codex</h1><p>Local Streamable HTTP MCP server</p></div>
+        </div>
+        <button id="config-close" class="close" type="button" aria-label="Close">×</button>
+      </header>
+      <div class="panel-body">
+        <p class="hint" data-i18n="config-hint">Add this server to <code>~/.codex/config.toml</code>. The URL already carries this worker's access token.</p>
+        <pre id="config-snippet" class="snippet"></pre>
+        <button id="copy-config" class="primary" type="button">Copy Codex config</button>
+        <p class="hint">The worker keeps running so the same endpoint stays available. Restarting <code>dsh --profile pet</code> keeps the token; deleting the token file issues a new one.</p>
+      </div>
+    </section>
+
+    <div id="toast" class="toast" hidden></div>
+  </main>
+  <script src="./assets/pet.js"></script>
+</body>
+</html>

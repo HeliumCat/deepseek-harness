@@ -116,6 +116,7 @@ interface McpResourceProvider {
 - [第三方记忆服务器](../user/guide/mcp-memory.zh.md) — 产品配置指南。
 - [协议协商参考](../../packages/mcp/mcp-client/README.zh.md) — SDK 职责与兼容性决策。
 - [Computer Use MCP 服务器](../../packages/experimental/cua-mcp/README.zh.md) — DSH 作为 MCP stdio 服务器向其他 harness 提供 Computer Use 程序。
+- [Pet worker MCP 端点](../../packages/bundle/pet-app/README.zh.md) — DSH 作为本机 Streamable HTTP MCP 服务器，供 Codex 调用以把任务派发给 DSH subagent。
 
 <!-- BEGIN GENERATED cordis-surface (gen-cordis-catalog.ts) — do not edit between markers -->
 

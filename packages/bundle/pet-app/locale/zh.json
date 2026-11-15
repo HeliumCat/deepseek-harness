@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "桌宠 worker",
+    "description": "运行一个常驻的委托 worker，并通过本地 MCP 服务显示透明桌宠。"
+  }
+}

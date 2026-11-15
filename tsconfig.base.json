@@ -522,6 +522,8 @@
       "@deepseek-ai/dsh-permission-presets": ["./packages/interaction/permission-presets/src"],
       "@deepseek-ai/dsh-persona": ["./packages/preset/persona/src"],
       "@deepseek-ai/dsh-personalized-recommendations": ["./packages/experimental/personalized-recommendations/src"],
+      "@deepseek-ai/dsh-pet-app": ["./packages/bundle/pet-app/src"],
+      "@deepseek-ai/dsh-pet-app/acceptance": ["./packages/bundle/pet-app/src/acceptance.ts"],
       "@deepseek-ai/dsh-plan-mode": ["./packages/plan/plan-mode/src"],
       "@deepseek-ai/dsh-plugin-detail": ["./packages/util/plugin-detail/src"],
       "@deepseek-ai/dsh-plugin-market": ["./packages/boot/plugin-market/src"],

@@ -116,6 +116,7 @@ MCP prompt templates, human-input elicitation, task-based execution, and resourc
 - [Third-party memory servers](../user/guide/mcp-memory.md) — product configuration guide.
 - [Protocol negotiation reference](../../packages/mcp/mcp-client/README.md) — SDK ownership and compatibility decisions.
 - [Computer use MCP server](../../packages/experimental/cua-mcp/README.md) — DSH as an MCP stdio server that serves Computer Use programs to other harnesses.
+- [Pet worker MCP endpoint](../../packages/bundle/pet-app/README.md) — DSH as a localhost Streamable HTTP MCP server that Codex calls to delegate tasks to DSH subagents.
 
 <!-- BEGIN GENERATED cordis-surface (gen-cordis-catalog.ts) — do not edit between markers -->
 
