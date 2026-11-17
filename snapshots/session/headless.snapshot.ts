@@ -1530,6 +1530,10 @@ describe('headless recorded-session snapshots', () => {
             if (scenario.name === 'advanced-toolchain') verifyAdvancedToolchain(actualLogs)
             if (scenario.name === 'subagent-depth-two-rejection') {
               expect(actualLogs).toHaveLength(3)
+              for (const child of actualLogs.slice(1)) {
+                expect(child.content).toContain('"agentReasoningEffort":"max"')
+                expect(child.content).toContain('"reasoningEffort":"max"')
+              }
               const leaf = actualLogs[2]!
               expect(leaf.content).toContain('DEPTH_REJECTED')
               for (const ancestor of actualLogs.slice(0, 2)) {

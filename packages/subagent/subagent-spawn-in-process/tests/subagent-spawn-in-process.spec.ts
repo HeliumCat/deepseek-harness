@@ -138,6 +138,25 @@ describe('dsh-subagent-spawn-in-process', () => {
       })
   })
 
+  it('returns rejected startup reservations and counts settled children until the tree policy ends', async () => {
+    const { ctx, parent } = await setup([textResponse('first child'), textResponse('next delegation')])
+    const request = { prompt: [{ type: 'text' as const, text: 'child prompt' }], parent }
+    await ctx.subagents.withTreePolicy(parent, { maxSubagents: 1 }, async () => {
+      await expect(ctx.subagents.startActivation({
+        ...request, provider: 'spawn', label: 'child', name: 'invalid name', delivery: 'caller', signal: new AbortController().signal,
+      }))
+        .rejects.toMatchObject({ name: 'SubagentError', code: 'INVALID_AGENT_NAME' })
+      const child = await start(ctx, 'spawn', request)
+      expect((await child.result).stopReason).toBe('completed')
+      await expect(start(ctx, 'spawn', request))
+        .rejects.toMatchObject({ name: 'SubagentError', code: 'CREATION_LIMIT_REACHED' })
+    })
+    await ctx.subagents.withTreePolicy(parent, { maxSubagents: 1 }, async () => {
+      const child = await start(ctx, 'spawn', request)
+      expect((await child.result).stopReason).toBe('completed')
+    })
+  })
+
   it('maps a child that hit its token ceiling to stopReason "max-tokens"', async () => {
     const { ctx, parent } = await setup([maxTokensResponse('cut off')])
     const run = await start(ctx, 'spawn', { prompt: [{ type: 'text', text: 'p' }], parent })

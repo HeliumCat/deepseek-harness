@@ -9,7 +9,7 @@
 
 import type { Agent, AgentOptions } from '@deepseek-ai/dsh-agent'
 import type { Branded } from '@deepseek-ai/dsh-brand'
-import type { ContentBlock, MessageId } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock, MessageId, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
 import type { ObjectJsonSchema } from '@deepseek-ai/dsh-tools'
 
@@ -23,6 +23,21 @@ export type SubagentRunId = Branded<'SubagentRunId'>
  */
 export function SubagentRunId(id: string): SubagentRunId {
   return id as SubagentRunId
+}
+
+/** Overrides and limits for new activations in one live subagent tree. */
+export interface SubagentTreePolicy {
+  /** Maximum child depth with the root at zero. Omit to keep normal depth policy. */
+  readonly maxDepth?: number
+  /** Cumulative new activations during this policy, including all descendants. Omit for no cumulative limit. */
+  readonly maxSubagents?: number
+  /** Required model route for new descendants. Omit to keep normal route selection. */
+  readonly subagentModel?: {
+    readonly provider: string
+    readonly model: string
+  }
+  /** Required reasoning effort for new descendants. Omit to keep normal effort selection. */
+  readonly reasoningEffort?: ReasoningEffortId
 }
 
 /** One managed child execution and its result delivery policy. */

@@ -56,6 +56,8 @@ The current `maxActiveSubagents` value is sampled before every new or cold-resum
 
 At capacity, creation or cold resume rejects with `ACTIVATION_LIMIT_REACHED` (browser prompts receive `subagent/delivery-unavailable`): wait for a child to finish or continue using the existing agents. Admission does not queue, because a parent waiting for descendants must not wait for its own occupied slot. Slots are process-local and do not constrain cumulative Session history or token usage.
 
+Hosts can use `withTreePolicy(root, options, run)` to enforce a depth cap, cumulative creation limit, model route, or reasoning effort for new descendants while `run` owns the tree. Every new activation reserves a cumulative slot before startup and keeps it after acceptance, including after completion. A rejected startup returns its slot. Exhaustion returns `CREATION_LIMIT_REACHED`. The host awaits the tree's work before leaving the policy scope.
+
 ### Local and external children
 
 `startActivation({ provider, label, name?, prompt, parent, signal, delivery })` returns `{ childId, name, messageId?, result, dispose }`. Supplying `childId` selects a local backend and guarantees `messageId`. Local children accept later messages and can cold-resume; external children expose one execution and reject continuation. `agentOptions` overrides supported child model settings. `delivery: 'parent'` supplies the model-facing completion notice; `delivery: 'caller'` lets workflows await the result without a parent notice or initial return guidance. Local parent delivery requires persistence; caller delivery can use an ephemeral local session. Cold resume requires persistence and Session query.

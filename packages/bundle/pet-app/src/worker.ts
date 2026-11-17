@@ -1,5 +1,5 @@
 /**
- * The worker that turns one Codex MCP delegation into one durable worker
+ * The worker that turns one Agent delegation into one durable worker
  * conversation and its subagent tree. The worker main agent analyzes the
  * delegation and spawns subagents; this service records the delegate envelope,
  * the live subagent set, the normalized transcripts, the acceptance verdict,
@@ -15,10 +15,11 @@ import { installModelSelection, type Agent, type AgentHandle, type AgentOptions,
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type {} from '@deepseek-ai/dsh-agent-preset-registry'
 import { brandString } from '@deepseek-ai/dsh-brand'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, LlmError, type LlmResolvedModelInfo, type ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent, SessionId, TurnEndReason } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-persistence'
-import type { SubagentRunEndInfo, SubagentRunInfo } from '@deepseek-ai/dsh-subagent'
+import { SubagentError, type SubagentRunEndInfo, type SubagentRunInfo } from '@deepseek-ai/dsh-subagent'
+import { ToolArgsError, ToolContextUnavailableError } from '@deepseek-ai/dsh-tools'
 import { HistoryStore, newDelegateId } from './history.ts'
 import { finalAssistantText, textOf, TranscriptBuilder } from './transcript.ts'
 import type {
@@ -30,6 +31,7 @@ import type {
   DelegateOutcome,
   DelegateRecord,
   HistoryGroup,
+  PetModelCatalog,
   PetSnapshot,
   SubagentRecord,
   SubagentStatus,
@@ -69,7 +71,7 @@ export interface PetWorkerOptions {
   readonly historyLimit: number
   /** Agent preset mounted for the worker main agent. */
   readonly presetId: string
-  /** MCP endpoint advertised to Codex, including its access token. */
+  /** MCP endpoint advertised to calling Agents, including its access token. */
   readonly mcpUrl: string
   /** Pet page URL advertised to the desktop window and history page. */
   readonly pageUrl: string
@@ -81,6 +83,21 @@ interface ActiveDelegation {
   readonly builder: TranscriptBuilder
 }
 
+const PET_DEFAULT_REASONING_EFFORT = brandString<ReasoningEffortId>('max')
+
+/** Select an advertised effort for the delegation's effective child route. */
+function resolvePetReasoningEffort(model: LlmResolvedModelInfo, requested?: ReasoningEffortId): ReasoningEffortId | undefined {
+  if (model.reasoning === undefined && requested === undefined) return undefined
+  const effort = requested ?? PET_DEFAULT_REASONING_EFFORT
+  if (model.reasoning?.efforts.some(candidate => candidate.id === effort) === true) return effort
+  const available = model.reasoning?.efforts.map(candidate => candidate.id).join(', ')
+  throw new LlmError(
+    `reasoning effort "${effort}" is unavailable for "${model.provider}/${model.id}".`
+      + (available === undefined ? '' : ` Choose one of: ${available}.`),
+    'UNSUPPORTED_REASONING_EFFORT',
+  )
+}
+
 /** One session whose events belong to a tracked record. */
 interface TrackedSession {
   readonly delegation: ActiveDelegation
@@ -88,12 +105,12 @@ interface TrackedSession {
 }
 
 /**
- * Resolve a worker session id from a human-readable Codex conversation name.
- * @param codexSession - the caller-supplied Codex conversation name.
+ * Resolve a worker session id from a human-readable Agent conversation name.
+ * @param agentSession - the caller-supplied Agent conversation name.
  * @returns the deterministic worker Session id.
  */
-export function workerSessionId(codexSession: string): SessionId {
-  const digest = createHash('sha256').update(codexSession).digest('hex')
+export function workerSessionId(agentSession: string): SessionId {
+  const digest = createHash('sha256').update(agentSession).digest('hex')
   return brandString<SessionId>(`pet-${digest.slice(0, 32)}`)
 }
 
@@ -222,44 +239,97 @@ export class PetWorker {
   }
 
   /**
-   * Delegate one task. Calls for the same Codex conversation run in arrival
+   * Discover routes or inspect a model's reasoning capabilities.
+   * @param query - Optional provider filter. Include a model to inspect one exact advertised route.
+   * @param signal - Cancellation of this catalog request.
+   * @returns Advertised routes and unavailable providers. Exact-model queries include reasoning capabilities.
+   * @throws If the requested model needs a provider, the route is unavailable, or the caller cancels.
+   */
+  async listSubagentModels(query: { readonly provider?: string; readonly model?: string }, signal?: AbortSignal): Promise<PetModelCatalog> {
+    const llm = this.ctx.llm
+    const { provider, model } = query
+    if (model !== undefined) {
+      if (provider === undefined) throw new ToolArgsError(['model requires provider'])
+      const info = await this.advertisedSubagentModel(provider, model, signal)
+      return {
+        models: [{ provider: info.provider, model: info.id, name: info.name, reasoning: info.reasoning ?? null }],
+        unavailableProviders: [],
+      }
+    }
+    const providers = llm.listProviders().filter(item => provider === undefined || item.id === provider)
+    if (provider !== undefined && providers.length === 0) {
+      throw new SubagentError(`LLM provider "${provider}" is not registered`, 'LLM_PROVIDER_NOT_FOUND')
+    }
+    signal?.throwIfAborted()
+    const catalogs = await Promise.allSettled(providers.map(item => llm.listModels(item.id)))
+    signal?.throwIfAborted()
+    const models: PetModelCatalog['models'][number][] = []
+    const unavailableProviders: string[] = []
+    for (const [index, catalog] of catalogs.entries()) {
+      if (catalog.status === 'fulfilled') {
+        for (const model of catalog.value) models.push({ provider: model.provider, model: model.id, name: model.name })
+      } else {
+        const failed = providers[index]
+        if (failed !== undefined) unavailableProviders.push(failed.id)
+      }
+    }
+    return { models, unavailableProviders }
+  }
+
+  private async advertisedSubagentModel(provider: string, model: string, signal?: AbortSignal): Promise<LlmResolvedModelInfo> {
+    signal?.throwIfAborted()
+    const models = await this.ctx.llm.listModels(provider)
+    signal?.throwIfAborted()
+    if (!models.some(candidate => candidate.id === model)) {
+      throw new SubagentError(`child model "${provider}/${model}" is not advertised; use list_subagent_models`, 'MODEL_ROUTE_NOT_ALLOWED')
+    }
+    return this.ctx.llm.resolveModelInfo(provider, model, signal)
+  }
+
+  private currentSubagentModel(agent: Agent, signal?: AbortSignal): Promise<LlmResolvedModelInfo> {
+    const route = agent.model.current()
+    if (route === undefined) throw new ToolContextUnavailableError('child model resolution requires a worker model route')
+    signal?.throwIfAborted()
+    return this.ctx.llm.resolveModelInfo(route.provider, route.model, signal)
+  }
+
+  /**
+   * Delegate one task. Calls for the same Agent conversation run in arrival
    * order; different conversations run concurrently.
-   * @param input - the Codex delegation fields.
+   * @param input - the delegation fields.
    * @param signal - caller cancellation; an aborted signal cancels the worker turn.
-   * @returns the terminal outcome returned to Codex.
-   * @throws Error when the worker is shutting down or the input is empty.
+   * @returns the terminal outcome returned to the caller.
+   * @throws When the worker is shutting down or the input is empty.
    */
   async delegate(input: DelegateInput, signal?: AbortSignal): Promise<DelegateOutcome> {
     if (this.closed) throw new Error('the pet worker is shutting down')
-    const codexSession = input.codexSession.trim()
-    if (codexSession === '') throw new Error('codexSession must be a non-empty Codex conversation name')
+    const agentSession = input.agentSession.trim()
+    if (agentSession === '') throw new Error('agentSession must be a non-empty Agent conversation name')
     if (input.task.trim() === '') throw new Error('task must be non-empty')
     const now = Date.now()
     const record: DelegateRecord = {
+      ...input,
       id: newDelegateId(now),
-      codexSession,
-      task: input.task,
-      acceptanceCriteria: input.acceptanceCriteria,
-      expectedReturn: input.expectedReturn,
+      agentSession,
       dispatchedAt: now,
       status: 'queued',
-      mainSessionId: workerSessionId(codexSession),
+      mainSessionId: workerSessionId(agentSession),
       workspace: this.options.workspace,
       transcript: [],
       subagents: [],
     }
     await this.history.begin(record)
-    const previous = this.queues.get(codexSession) ?? Promise.resolve()
+    const previous = this.queues.get(agentSession) ?? Promise.resolve()
     const run = previous.then(
       async () => this.run(record, signal),
       async () => this.run(record, signal),
     )
     const tail = run.then(() => undefined, () => undefined)
-    this.queues.set(codexSession, tail)
+    this.queues.set(agentSession, tail)
     try {
       return await run
     } finally {
-      if (this.queues.get(codexSession) === tail) this.queues.delete(codexSession)
+      if (this.queues.get(agentSession) === tail) this.queues.delete(agentSession)
     }
   }
 
@@ -268,11 +338,30 @@ export class PetWorker {
     record.status = 'running'
     this.active.set(record.id, delegation)
     await this.persist(delegation)
+    let modelInfo: LlmResolvedModelInfo | undefined
+    if (record.subagentModel !== undefined) {
+      const { provider, model } = record.subagentModel
+      try {
+        modelInfo = await this.advertisedSubagentModel(provider, model, signal)
+      } catch (error) {
+        const message = signal?.aborted === true && signal.reason === error ? undefined : `cannot resolve child model: ${String(error)}`
+        return this.finish(delegation, undefined, message)
+      }
+    }
     let agent: Agent
     try {
-      agent = await this.ensureAgent(record.codexSession)
+      agent = await this.ensureAgent(record.agentSession)
     } catch (error) {
       return this.finish(delegation, undefined, `worker agent unavailable: ${String(error)}`)
+    }
+    let reasoningEffort: ReasoningEffortId | undefined
+    try {
+      const info = modelInfo ?? await this.currentSubagentModel(agent, signal)
+      signal?.throwIfAborted()
+      reasoningEffort = resolvePetReasoningEffort(info, record.reasoningEffort)
+    } catch (error) {
+      const message = signal?.aborted === true && signal.reason === error ? undefined : `cannot resolve child reasoning effort: ${String(error)}`
+      return this.finish(delegation, undefined, message)
     }
     this.activeBySession.set(agent.session.id, delegation)
     this.tracked.set(agent.session.id, { delegation })
@@ -284,16 +373,19 @@ export class PetWorker {
     const abort = (): void => { agent.cancel({ kind: 'user' }) }
     signal?.addEventListener('abort', abort, { once: true })
     try {
-      const envelope = this.envelope(record)
-      agent.followup(createUserMessage({ content: [{ type: 'text', text: envelope }], source: { kind: 'user' } }))
-      if (signal?.aborted === true) agent.cancel({ kind: 'user' })
-      const aborted = new Promise<undefined>((resolve) => {
-        if (signal === undefined) return
-        signal.addEventListener('abort', () => { resolve(undefined) }, { once: true })
-        if (signal.aborted) resolve(undefined)
+      const policy = reasoningEffort === undefined ? record : { ...record, reasoningEffort }
+      await this.ctx.subagents.withTreePolicy(agent, policy, async () => {
+        const envelope = this.envelope(record)
+        agent.followup(createUserMessage({ content: [{ type: 'text', text: envelope }], source: { kind: 'user' } }))
+        if (signal?.aborted === true) agent.cancel({ kind: 'user' })
+        const aborted = new Promise<undefined>((resolve) => {
+          if (signal === undefined) return
+          signal.addEventListener('abort', () => { resolve(undefined) }, { once: true })
+          if (signal.aborted) resolve(undefined)
+        })
+        turnReasonValue = signal === undefined ? await turnEnded : await Promise.race([turnEnded, aborted])
+        await this.settle(agent)
       })
-      turnReasonValue = signal === undefined ? await turnEnded : await Promise.race([turnEnded, aborted])
-      await this.settle(agent)
     } catch (error) {
       return await this.finish(delegation, undefined, String(error))
     } finally {
@@ -351,7 +443,7 @@ export class PetWorker {
 
   private envelope(record: DelegateRecord): string {
     return [
-      `Codex delegation ${record.id} from conversation ${JSON.stringify(record.codexSession)}.`,
+      `Agent delegation ${record.id} from conversation ${JSON.stringify(record.agentSession)}.`,
       '',
       'Task:',
       record.task,
@@ -362,12 +454,14 @@ export class PetWorker {
       'Expected return:',
       record.expectedReturn,
       '',
+      ...record.maxDepth === undefined ? [] : [`Maximum subagent depth: ${record.maxDepth} (direct children are depth 1).`],
+      ...record.maxSubagents === undefined ? [] : [`Maximum subagents for this delegation: ${record.maxSubagents}, across all levels.`],
       'Analyze the task, delegate it to one or more subagents with the `subagent` tool, wait for their results, compare them with the acceptance criteria, call `pet_acceptance` once, and reply with the expected return content.',
     ].join('\n')
   }
 
-  private async ensureAgent(codexSession: string): Promise<Agent> {
-    const sessionId = workerSessionId(codexSession)
+  private async ensureAgent(agentSession: string): Promise<Agent> {
+    const sessionId = workerSessionId(agentSession)
     const live = this.ctx.agents.get(sessionId)
     if (live !== undefined) return live
     const existing = await this.ctx.sessionPersistence.stat(sessionId)
@@ -496,7 +590,7 @@ export class PetWorker {
       .sort((left, right) => left.record.dispatchedAt - right.record.dispatchedAt)
       .map(({ record }) => ({
         id: record.id,
-        codexSession: record.codexSession,
+        agentSession: record.agentSession,
         dispatchedAt: record.dispatchedAt,
         status: record.status,
         subagents: record.subagents
@@ -505,7 +599,7 @@ export class PetWorker {
             id: subagent.sessionId,
             runId: subagent.runId,
             delegateId: record.id,
-            codexSession: record.codexSession,
+            agentSession: record.agentSession,
             name: subagent.name,
             label: subagent.label,
             icon: subagent.icon,
@@ -535,8 +629,8 @@ export class PetWorker {
   }
 
   /**
-   * History grouped by Codex conversation.
-   * @returns the retained history grouped by Codex conversation.
+   * History grouped by Agent conversation.
+   * @returns the retained history grouped by Agent conversation.
    */
   historyGroups(): HistoryGroup[] {
     return this.history.groups()

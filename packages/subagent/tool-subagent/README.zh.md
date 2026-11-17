@@ -61,7 +61,7 @@ kind: "package-reference"
 
 所有后端都由运行时自动递送完成通知，前提是子任务结束时调用方 Agent 仍在线。通知包含最终回答，除非子任务在结束前刚向该 Agent 发过消息。本地 Spawn 和 Fork 子任务还可以发送消息，在活跃期间通过 `send_message` 接受更多工作，或在结束后恢复。Codex、Claude Code、ACP 与 DSH SDK 后端不接受后续消息。
 
-`maxDepth` 限制递归深度（`0` 禁止委派）；省略时，每次委派读取 Host 当前的 `subagent.maxDepth` 设置，初始值为 `1`。数值深度要求提供方具备 `depthLimit` 能力；`'provider-managed'` 把预算留给进程外提供方。工具在达到上限时仍然可见；每次尝试启动都会检查调用 agent 的当前深度，被拒绝时返回出错的工具结果。
+`maxDepth` 限制递归深度（`0` 禁止委派）。省略时，每次委派读取 Host 当前的 `subagent.maxDepth` 设置，初始值为 `1`。生效的树策略提供默认值，并约束显式数值深度。数值深度要求提供方具备 `depthLimit` 能力。`'provider-managed'` 将深度交给进程外提供方，树策略要求限制时除外。工具在达到上限时仍然可见，启动尝试会返回出错的工具结果。
 
 <a id="selecting-a-child-preset"></a>
 ### 选择子级 preset

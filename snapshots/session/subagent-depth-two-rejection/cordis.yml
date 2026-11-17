@@ -1,8 +1,6 @@
-# Depth-limit snapshot overlay: keep the default composition and allow two
-# generations of spawn children before runtime enforcement rejects another.
+# Use the scenario's scoped depth policy for the spawn tool.
 - id: tool-subagent
   name: '@deepseek-ai/dsh-tool-subagent'
   config:
     provider: spawn
     toolName: subagent
-    maxDepth: 2

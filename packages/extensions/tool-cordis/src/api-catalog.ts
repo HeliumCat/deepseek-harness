@@ -3973,10 +3973,17 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     description: 'Named provider registry with managed activations, durable discovery, and local child messaging.',
     methods: [
       {
-        signature: 'resolveMaxDepth(configured?: number | \'provider-managed\'): number | undefined',
+        signature: 'resolveMaxDepth(configured?: number | \'provider-managed\', parent?: Agent): number | undefined',
         description: 'Resolve a delegation tool\'s depth policy against the current user setting.',
-        parameters: [{ name: 'configured', description: 'Explicit tool limit, or provider-managed for external delegation.' }],
+        parameters: [{ name: 'configured', description: 'Explicit tool limit, or provider-managed for external delegation.' }, { name: 'parent', description: 'When supplied, use the scoped tree limit as the default and cap any explicit numeric limit.' }],
         returns: 'The numeric limit, or undefined when the provider owns depth enforcement.',
+      },
+      {
+        signature: 'async withTreePolicy<T>(root: Agent, options: SubagentTreePolicy, run: () => Promise<T>): Promise<T>',
+        description: 'Apply limits, model selection, and reasoning effort to new activations while an operation owns a live root.',
+        parameters: [{ name: 'root', description: 'Exact live root of the affected tree.' }, { name: 'options', description: 'Tree-wide overrides and cumulative allowance for the operation.' }, { name: 'run', description: 'Operation that keeps ownership until all work within its policy settles.' }],
+        returns: 'The operation result after removing the policy.',
+        throws: ['If the caller is not the live root, it already has an active policy, or a limit is invalid.'],
       },
       {
         signature: 'startActivation(spec: SubagentActivationSpec & { readonly childId: SessionId }): Promise<SubagentActivation & { readonly messageId: MessageId }>',
@@ -9984,7 +9991,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SubagentRuntime',
-    declaration: 'export class SubagentRuntime extends TypertRemoteService {\n    static Config;\n    static inject;\n    constructor(ctx: Context, private config: Config);\n    resolveMaxDepth(configured?: number | \'provider-managed\'): number | undefined;\n    startActivation(spec: SubagentActivationSpec & {\n        readonly childId: SessionId;\n    }): Promise<SubagentActivation & {\n        readonly messageId: MessageId;\n    }>;\n    startActivation(spec: SubagentActivationSpec): Promise<SubagentActivation>;\n    rootOf(caller: Agent): Agent;\n    namesOf(agent: Agent): SubagentMemberNames;\n    async resolveName(caller: Agent, name: string, signal: AbortSignal): Promise<SessionId>;\n    async waitForTreeWork(root: Agent): Promise<boolean>;\n    async sendMessage(sender: Agent, targetId: SessionId, content: ContentBlock[], options: SubagentSendMessageOptions): Promise<MessageId>;\n    interrupt(targetSessionId: SessionId, authority: SubagentInterruptAuthority): void;\n    async drainDescendants(parents: readonly Agent[]): Promise<void>;\n    listDescendants(rootSessionId: SessionId, signal?: AbortSignal): Promise<SubagentDescendantListEntry[]>;\n    @Remote({ name: \'prompt\', resources: { session: request => request.childSessionId } })\n    async prompt(request: SubagentPromptRequest, signal: AbortSignal): Promise<SubagentPromptReceipt>;\n    @Remote({ name: \'interruptByUser\', resources: { session: childSessionId => childSessionId } })\n    interruptByUser(childSessionId: SessionId): SubagentInterruptReceipt;\n  /* …truncated — full shape in source */',
+    declaration: 'export class SubagentRuntime extends TypertRemoteService {\n    static Config;\n    static inject;\n    constructor(ctx: Context, private config: Config);\n    resolveMaxDepth(configured?: number | \'provider-managed\', parent?: Agent): number | undefined;\n    async withTreePolicy<T>(root: Agent, options: SubagentTreePolicy, run: () => Promise<T>): Promise<T>;\n    startActivation(spec: SubagentActivationSpec & {\n        readonly childId: SessionId;\n    }): Promise<SubagentActivation & {\n        readonly messageId: MessageId;\n    }>;\n    startActivation(spec: SubagentActivationSpec): Promise<SubagentActivation>;\n    rootOf(caller: Agent): Agent;\n    namesOf(agent: Agent): SubagentMemberNames;\n    async resolveName(caller: Agent, name: string, signal: AbortSignal): Promise<SessionId>;\n    async waitForTreeWork(root: Agent): Promise<boolean>;\n    async sendMessage(sender: Agent, targetId: SessionId, content: ContentBlock[], options: SubagentSendMessageOptions): Promise<MessageId>;\n    interrupt(targetSessionId: SessionId, authority: SubagentInterruptAuthority): void;\n    async drainDescendants(parents: readonly Agent[]): Promise<void>;\n    listDescendants(rootSessionId: SessionId, signal?: AbortSignal): Promise<SubagentDescendantListEntry[]>;\n    @Remote({ name: \'prompt\', resources: { session: request => request.childSessionId } })\n    async prompt(request: SubagentPromptRequest, signal: AbortSignal): Promise<SubagentPromptReceipt>;\n    @Remote({ name: \'interruptByUser\', resources: {  /* …truncated — full shape in source */',
   },
   {
     name: 'SubagentSendMessageOptions',
@@ -10001,6 +10008,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'SubagentStopReasonMap',
     declaration: 'export interface SubagentStopReasonMap {\n    completed: \'completed\';\n    aborted: \'aborted\';\n    error: \'error\';\n    \'max-tokens\': \'max-tokens\';\n    refusal: \'refusal\';\n}',
+  },
+  {
+    name: 'SubagentTreePolicy',
+    declaration: 'export interface SubagentTreePolicy {\n    readonly maxDepth?: number;\n    readonly maxSubagents?: number;\n    readonly subagentModel?: {\n        readonly provider: string;\n        readonly model: string;\n    };\n    readonly reasoningEffort?: ReasoningEffortId;\n}',
   },
   {
     name: 'SubprocessCollect',

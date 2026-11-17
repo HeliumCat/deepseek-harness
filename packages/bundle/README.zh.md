@@ -25,7 +25,7 @@ kind: "package-group"
 | [`base`](base/README.zh.md) | 基于 base 的 profile 共享核心 | —（仅 patch） |
 | [`acp-app`](acp-app/README.zh.md) | 基于 base、仅用于自动化的 ACP stdio 应用 | 挂载 ACP bridge |
 | [`web-app`](web-app/README.zh.md) | 基于 base 的浏览器应用层 | 挂载多条 Web 配置行 |
-| [`pet-app`](pet-app/README.zh.md) | 基于 base 与 Web 的常驻 pet worker：桌面桌宠与本机 Codex MCP 端点 | 提供 `ctx.petWorker` |
+| [`pet-app`](pet-app/README.zh.md) | 常驻 pet worker，提供桌宠和供 Agent 派发任务的本机 MCP 端点 | 提供 `ctx.petWorker` |
 | [`headless`](headless/README.zh.md) | 基于 base 的一次性命令行任务应用 | `headless-runner` |
 | [`sdk-app`](sdk-app/README.zh.md) | 基于 base 的 SDK JSON-RPC stdio 应用 | 挂载 SDK 服务器 |
 | [`sdk-minimal`](sdk-minimal/README.zh.md) | 不使用 base 或 Web 的独立极简 SDK 应用 | —（完整 patch 树） |

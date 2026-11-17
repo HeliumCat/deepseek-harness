@@ -1,0 +1,3 @@
+- insert:
+    - id: tree-policy
+      name: './tree-policy.mjs'

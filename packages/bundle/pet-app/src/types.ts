@@ -1,21 +1,38 @@
 /**
- * Durable and wire types for the pet worker: one Codex delegation, the
+ * Durable and wire types for the pet worker: one Agent delegation, the
  * subagents it spawned, the normalized transcripts the pet renders, and the
  * capped history entry that survives while a record is evicted.
  *
  * @module @deepseek-ai/dsh-pet-app/types
  */
 
-/** One delegated task exactly as the Codex MCP client sends it. */
-export interface DelegateInput {
-  /** Stable human-readable name of the calling Codex conversation, never a session id. */
-  readonly codexSession: string
-  /** The task Codex delegates. */
+import type { SubagentTreePolicy } from '@deepseek-ai/dsh-subagent'
+import type { LlmModelReasoningInfo } from '@deepseek-ai/dsh-llm'
+
+/** One delegated task normalized from an MCP tool call. */
+export interface DelegateInput extends SubagentTreePolicy {
+  /** Caller-supplied conversation name, unique per conversation and reused across its calls. */
+  readonly agentSession: string
+  /** The task the caller delegates. */
   readonly task: string
   /** How the worker must judge whether the task succeeded. */
   readonly acceptanceCriteria: string
-  /** The content Codex expects back. */
+  /** The content the caller expects back. */
   readonly expectedReturn: string
+}
+
+/** Advertised model routes and providers whose catalogs could not be read. */
+export interface PetModelCatalog {
+  /** Model routes accepted by the delegation tool, with labels for choosing a route. */
+  readonly models: readonly {
+    readonly provider: string
+    readonly model: string
+    readonly name: string
+    /** Exact-model capability. Omitted in bulk listings. Null when the model has no selectable efforts. */
+    readonly reasoning?: LlmModelReasoningInfo | null
+  }[]
+  /** Provider ids to retry individually if their catalogs could not be read. */
+  readonly unavailableProviders: readonly string[]
 }
 
 /** Terminal or in-flight state of one delegation. */
@@ -114,11 +131,11 @@ export interface SubagentRecord {
 }
 
 /** One delegation and everything the pet can show for it. */
-export interface DelegateRecord {
+export interface DelegateRecord extends SubagentTreePolicy {
   /** Pet-local record identity, also used as the record file name. */
   readonly id: string
-  /** The Codex conversation name supplied by the caller. */
-  readonly codexSession: string
+  /** The calling Agent’s conversation name. */
+  readonly agentSession: string
   /** The delegated task. */
   readonly task: string
   /** The acceptance criteria supplied by the caller. */
@@ -154,8 +171,8 @@ export interface DelegateRecord {
 export interface HistoryEntry {
   /** Pet-local record identity. */
   readonly id: string
-  /** Codex conversation name used for grouping. */
-  readonly codexSession: string
+  /** Agent conversation name used for grouping. */
+  readonly agentSession: string
   /** Epoch milliseconds at dispatch. */
   readonly dispatchedAt: number
   /** Epoch milliseconds at settlement. */
@@ -170,10 +187,10 @@ export interface HistoryEntry {
   readonly accepted?: boolean
 }
 
-/** One Codex conversation's slice of the history list. */
+/** One Agent conversation's slice of the history list. */
 export interface HistoryGroup {
   /** Conversation name supplied by the caller. */
-  readonly codexSession: string
+  readonly agentSession: string
   /** Number of retained records in this group. */
   readonly count: number
   /** Epoch milliseconds of the newest record. */
@@ -185,7 +202,7 @@ export interface HistoryGroup {
 /** One running delegation reduced to what the pet needs to draw it. */
 export interface ActiveDelegateSnapshot {
   readonly id: string
-  readonly codexSession: string
+  readonly agentSession: string
   readonly dispatchedAt: number
   readonly status: DelegateStatus
   readonly subagents: readonly ActiveSubagentSnapshot[]
@@ -196,7 +213,7 @@ export interface ActiveSubagentSnapshot {
   readonly id: string
   readonly runId: string
   readonly delegateId: string
-  readonly codexSession: string
+  readonly agentSession: string
   readonly name: string
   readonly label: string
   readonly icon: string
@@ -208,7 +225,7 @@ export interface ActiveSubagentSnapshot {
 export interface PetSnapshot {
   /** Server epoch milliseconds. */
   readonly generatedAt: number
-  /** MCP endpoint Codex should connect to, including its access token. */
+  /** MCP endpoint for calling Agents, including its access token. */
   readonly mcpUrl: string
   /** Pet page URL, including its access token. */
   readonly pageUrl: string
@@ -220,7 +237,7 @@ export interface PetSnapshot {
   readonly active: readonly ActiveDelegateSnapshot[]
 }
 
-/** Result the MCP tool returns to Codex. */
+/** Result the MCP tool returns to the caller. */
 export interface DelegateOutcome {
   /** Pet-local record identity. */
   readonly id: string

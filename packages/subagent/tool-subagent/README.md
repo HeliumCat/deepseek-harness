@@ -61,7 +61,7 @@ The optional `name` argument names the child, unique among the caller's children
 
 For every backend, the runtime automatically delivers the completion notice if the calling Agent is still online when the child finishes. The notice includes the final answer unless the child sent that Agent a message just before finishing. Local Spawn and Fork children can also send messages, accept more work through `send_message` while active, or resume after settling. Codex, Claude Code, ACP, and DSH SDK backends do not accept follow-up messages.
 
-`maxDepth` caps recursion (`0` forbids delegation); omission reads the current Host `subagent.maxDepth` setting, initially `1`, at each delegation. A numeric depth requires a provider with the `depthLimit` capability; `'provider-managed'` leaves the budget to an out-of-process provider. The tool stays visible at the cap; each attempted start checks the calling agent's current depth and rejects with an errored result.
+`maxDepth` caps recursion (`0` forbids delegation). Omission reads the current Host `subagent.maxDepth` setting, initially `1`, at each delegation. An active tree policy supplies the default and caps explicit numeric depth. A numeric depth requires a provider with the `depthLimit` capability. `'provider-managed'` leaves depth to an out-of-process provider unless a tree policy requires it. The tool stays visible at the cap and rejects attempted starts with an errored result.
 
 <a id="selecting-a-child-preset"></a>
 ### Selecting a child preset

@@ -317,7 +317,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
           }
         }
         exec.signal.throwIfAborted()
-        const maxDepth = ctx.subagents.resolveMaxDepth(config.maxDepth)
+        const maxDepth = ctx.subagents.resolveMaxDepth(config.maxDepth, parent)
         const request = {
           ...args.cwd === undefined ? {} : { cwd: args.cwd },
           prompt: [{ type: 'text', text: args.prompt }] as ContentBlock[],
@@ -386,7 +386,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     text: (context) => {
       if (context.agent === undefined || mounted === undefined
         || ctx.tools.get(toolName, context.scope) !== mounted.definition) return ''
-      const maxDepth = ctx.subagents.resolveMaxDepth(config.maxDepth)
+      const maxDepth = ctx.subagents.resolveMaxDepth(config.maxDepth, context.agent)
       if (maxDepth === undefined) return ''
       const depth = delegationDepthOf(context.agent)
       if (depth < maxDepth) return ''

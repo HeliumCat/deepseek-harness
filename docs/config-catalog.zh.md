@@ -2777,8 +2777,8 @@ export interface Config {
 
 ## `@deepseek-ai/dsh-pet-app`
 
-- `inject`: `webServer` · `agents` · `agentPresets` · `agentDefaultModel` · `sessions` · `sessionPersistence` · `subagents`
-- `source`: [`packages/bundle/pet-app/src/index.ts:34`](../packages/bundle/pet-app/src/index.ts)
+- `inject`: `webServer` · `agents` · `agentPresets` · `agentDefaultModel` · `llm` · `sessions` · `sessionPersistence` · `subagents`
+- `source`: [`packages/bundle/pet-app/src/index.ts:35`](../packages/bundle/pet-app/src/index.ts)
 
 ```ts config-catalog
 /** Pet worker configuration, changeable from the profile patch. */
@@ -3797,7 +3797,7 @@ export type JournalMode = 'wal' | 'delete' | 'truncate' | 'persist'
 
 - `inject`: `workingDirectory` · `sessionProjections`
 - `refs`: `Volatile` (`@deepseek-ai/cordis`)
-- `source`: [`packages/subagent/subagent/src/index.ts:186`](../packages/subagent/subagent/src/index.ts)
+- `source`: [`packages/subagent/subagent/src/index.ts:189`](../packages/subagent/subagent/src/index.ts)
 
 ```ts config-catalog
 /** Host configuration for continuable subagent capacity. */

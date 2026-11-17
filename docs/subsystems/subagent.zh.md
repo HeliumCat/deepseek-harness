@@ -10,6 +10,8 @@
 
 可选的 `cwd` 指定子级的初始目录；相对路径以父级当前有效目录为基准解析。省略时，在准入阶段捕获该目录。本地子 Session 保留父级的原始项目，冷恢复保留其日志中的目录状态。
 
+`SubagentTreePolicy` 提供 `withTreePolicy` 接受的 `maxDepth`、`maxSubagents`、`subagentModel` 和 `reasoningEffort` 选项。[包参考](../../packages/subagent/subagent/README.zh.md)定义作用域、计数和启动失败规则。
+
 ```ts type-equiv
 /**
  * Start-time options supported by a registered backend. The manager checks
@@ -446,9 +448,20 @@ Named provider registry with managed activations, durable discovery, and local c
 /**
  * Resolve a delegation tool's depth policy against the current user setting.
  * @param configured - Explicit tool limit, or provider-managed for external delegation.
+ * @param parent - When supplied, use the scoped tree limit as the default and cap any explicit numeric limit.
  * @returns The numeric limit, or undefined when the provider owns depth enforcement.
  */
-resolveMaxDepth(configured?: number | 'provider-managed'): number | undefined
+resolveMaxDepth(configured?: number | 'provider-managed', parent?: Agent): number | undefined
+
+/**
+ * Apply limits, model selection, and reasoning effort to new activations while an operation owns a live root.
+ * @param root - Exact live root of the affected tree.
+ * @param options - Tree-wide overrides and cumulative allowance for the operation.
+ * @param run - Operation that keeps ownership until all work within its policy settles.
+ * @returns The operation result after removing the policy.
+ * @throws If the caller is not the live root, it already has an active policy, or a limit is invalid.
+ */
+async withTreePolicy<T>(root: Agent, options: SubagentTreePolicy, run: () => Promise<T>): Promise<T>
 
 /**
  * Start a local child under its reserved identity.

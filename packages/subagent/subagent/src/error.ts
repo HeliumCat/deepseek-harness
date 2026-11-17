@@ -45,6 +45,8 @@ export type SubagentErrorCode =
   | 'UNAUTHORIZED'
   /** The tree's activation capacity is exhausted. */
   | 'ACTIVATION_LIMIT_REACHED'
+  /** The scoped tree policy's cumulative allowance for new activations is exhausted. */
+  | 'CREATION_LIMIT_REACHED'
   /** The target activation is closing. */
   | 'ACTIVATION_CLOSING'
   /** Releasing an activation's resources failed. */

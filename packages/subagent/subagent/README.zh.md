@@ -56,6 +56,8 @@ kind: "package-reference"
 
 容量耗尽时，新建或冷恢复以 `ACTIVATION_LIMIT_REACHED` 拒绝（浏览器消息返回 `subagent/delivery-unavailable`）：等待子代理完成，或继续使用现有代理。接纳不会排队，避免等待后代的父代理又等待自己占用的名额。名额仅存在于当前进程，不限制累计 Session 历史或 token 用量。
 
+Host 可以通过 `withTreePolicy(root, options, run)` 在 `run` 持有子代理树期间为新建后代强制指定深度上限、累计创建上限、模型路由或推理强度。每个新 activation 在启动前预留累计额度，接纳后一直计入额度，包括完成之后。启动被拒绝时归还额度。额度耗尽时返回 `CREATION_LIMIT_REACHED`。Host 在离开该作用域前等待树内工作结算。
+
 ### 本地与外部子级
 
 `startActivation({ provider, label, name?, prompt, parent, signal, delivery })` 返回 `{ childId, name, messageId?, result, dispose }`。提供 `childId` 会选择本地后端，并保证返回 `messageId`。本地子级接受后续消息并支持冷恢复；外部子级只暴露一次执行，拒绝继续输入。`agentOptions` 覆盖后端支持的子级模型设置。`delivery: 'parent'` 提供面向模型的完成通知；`delivery: 'caller'` 让工作流等待结果，不发送父级通知，也不附加初始返回指导。本地父级投递需要持久化，调用方投递可以使用临时本地会话；冷恢复需要持久化与 Session 查询服务。

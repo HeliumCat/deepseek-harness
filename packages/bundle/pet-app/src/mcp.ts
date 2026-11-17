@@ -1,7 +1,7 @@
 /**
- * The localhost MCP endpoint Codex calls. One stateless Streamable HTTP handler
- * serves a single `subagent_delegate` tool; the endpoint authenticates with the
- * pet access token carried in the URL or a bearer header.
+ * The localhost MCP endpoint for calling Agents. One stateless Streamable HTTP handler
+ * serves tool discovery and delegation. The endpoint authenticates with the pet
+ * access token carried in the URL or a bearer header.
  *
  * @module @deepseek-ai/dsh-pet-app/mcp
  */
@@ -10,31 +10,47 @@ import { createHash, timingSafeEqual } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { createRequire } from 'node:module'
 import type { Context } from '@deepseek-ai/cordis'
+import { brandString } from '@deepseek-ai/dsh-brand'
 import type {} from '@deepseek-ai/dsh-host-webserver'
+import type { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import { createMcpHandler, Server, type CallToolResult, type McpHttpHandler, type Tool } from '@modelcontextprotocol/server'
 import { toNodeHandler, type NodeIncomingMessageLike } from '@modelcontextprotocol/node'
 import type { PetWorker } from './worker.ts'
-import type { DelegateOutcome } from './types.ts'
+import type { DelegateInput, DelegateOutcome } from './types.ts'
 
 /** Server name shown to connected MCP clients. */
 const MCP_SERVER_NAME = 'dsh_pet'
 
-/** The one tool Codex sees. */
-const DELEGATE_TOOL: Tool = {
-  name: 'subagent_delegate',
-  title: 'Delegate to a DSH subagent worker',
-  description:
-    'Delegate one concrete task to the resident DeepSeek Harness worker and wait for its result. The worker analyzes the '
-    + 'task, runs one or more DSH subagents, checks the result against your acceptance criteria, and returns the expected '
-    + 'content. Pass the same codexSession value for every call in one Codex conversation; it is the history grouping key, '
-    + 'not a session id. The call blocks until the worker finishes; do not repeat work this call already covers.',
+const LIST_MODELS_TOOL: Tool = {
+  name: 'list_subagent_models',
+  title: 'List DSH subagent models',
+  description: 'List subagent models or inspect one model’s reasoning efforts and adapter default.',
   inputSchema: {
     type: 'object',
     additionalProperties: false,
     properties: {
-      codexSession: {
+      provider: { type: 'string', minLength: 1, description: 'Provider ID. Omit to list models from all registered providers.' },
+      model: { type: 'string', minLength: 1, description: 'Exact model ID. Requires provider. Include to get supported efforts and the adapter default.' },
+    },
+  },
+  annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+}
+
+const DELEGATE_TOOL: Tool = {
+  name: 'subagent_delegate',
+  title: 'Delegate to DSH subagents',
+  description:
+    'Delegate one concrete task to the resident DeepSeek Harness worker and wait for its result. The worker analyzes the '
+    + 'task, runs one or more DSH subagents, checks the result against your acceptance criteria, and returns the expected '
+    + 'content.',
+  inputSchema: {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      agentSession: {
         type: 'string',
-        description: 'Human-readable name of the current Codex conversation, stable across this conversation\'s calls.',
+        minLength: 1,
+        description: 'Name for the calling Agent’s conversation. Reuse it within this conversation and choose a distinct name for any other conversation.',
       },
       task: {
         type: 'string',
@@ -48,8 +64,30 @@ const DELEGATE_TOOL: Tool = {
         type: 'string',
         description: 'The content, format, and scope the worker should return.',
       },
+      subagentModel: {
+        type: 'object',
+        description: 'Model for every new subagent in this delegation. Use IDs from list_subagent_models. Omit for normal DSH model selection.',
+        additionalProperties: false,
+        properties: {
+          provider: { type: 'string', minLength: 1, description: 'Provider ID.' },
+          model: { type: 'string', minLength: 1, description: 'Model ID within that provider.' },
+        },
+        required: ['provider', 'model'],
+      },
+      reasoningEffort: {
+        type: 'string', minLength: 1,
+        description: 'Effort ID for new subagents. Use an advertised ID. Omit for max on models with selectable efforts.',
+      },
+      maxDepth: {
+        type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER,
+        description: 'Maximum descendant depth. Direct children are depth 1. Omit to use the DSH depth setting.',
+      },
+      maxSubagents: {
+        type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER,
+        description: 'Maximum cumulative subagent creations across all depths for this delegation, including completed runs. Omit for no cumulative cap.',
+      },
     },
-    required: ['codexSession', 'task', 'acceptanceCriteria', 'expectedReturn'],
+    required: ['agentSession', 'task', 'acceptanceCriteria', 'expectedReturn'],
   },
   annotations: {
     readOnlyHint: false,
@@ -60,11 +98,8 @@ const DELEGATE_TOOL: Tool = {
 }
 
 const INSTRUCTIONS =
-  'DeepSeek Harness pet worker: delegate substantial work to the resident worker with `subagent_delegate`. '
-  + 'The worker analyzes the task, spawns DSH subagents, verifies the acceptance criteria, and returns the expected '
-  + 'content. Pass the same `codexSession` conversation name on every call in this conversation; use a new name only for '
-  + 'a different conversation. The call blocks until the worker finishes. The worker may split the task across several '
-  + 'subagents, so the result can combine more than one subagent report.'
+  'Use `subagent_delegate` for substantial work you can hand off with clear acceptance criteria. '
+  + 'If choosing a specific subagent model or reasoning effort, use `list_subagent_models` to get the available IDs first.'
 
 /** Package version reported to MCP clients. */
 function packageVersion(): string {
@@ -83,7 +118,7 @@ function failure(value: string): CallToolResult {
 }
 
 /**
- * Render one delegation outcome as the text Codex receives.
+ * Render one delegation outcome as the text the calling Agent receives.
  * @param outcome - the terminal delegation outcome.
  * @returns the tool result text.
  */
@@ -108,8 +143,49 @@ function requiredString(args: Record<string, unknown>, name: string): string | u
   return typeof value === 'string' && value.trim() !== '' ? value : undefined
 }
 
+/** Parse MCP delegation arguments before starting any work. */
+function delegateInput(args: Record<string, unknown>): DelegateInput | string {
+  const agentSession = requiredString(args, 'agentSession')
+  const task = requiredString(args, 'task')
+  const acceptanceCriteria = requiredString(args, 'acceptanceCriteria')
+  const expectedReturn = requiredString(args, 'expectedReturn')
+  if (agentSession === undefined || task === undefined || acceptanceCriteria === undefined || expectedReturn === undefined) {
+    return 'subagent_delegate requires non-empty agentSession, task, acceptanceCriteria, and expectedReturn strings.'
+  }
+  const model = args['subagentModel']
+  let subagentModel: DelegateInput['subagentModel']
+  if (model !== undefined) {
+    if (typeof model !== 'object' || model === null || Array.isArray(model) || Object.keys(model).length !== 2
+      || !('provider' in model) || typeof model.provider !== 'string' || model.provider.trim() === ''
+      || !('model' in model) || typeof model.model !== 'string' || model.model.trim() === '') {
+      return 'subagentModel requires non-empty provider and model strings from list_subagent_models.'
+    }
+    subagentModel = { provider: model.provider.trim(), model: model.model.trim() }
+  }
+  const reasoningEffort = requiredString(args, 'reasoningEffort')?.trim()
+  if (reasoningEffort === undefined && args['reasoningEffort'] !== undefined) {
+    return 'reasoningEffort must be a non-empty effort ID from list_subagent_models.'
+  }
+  const maxDepth = args['maxDepth']
+  const maxSubagents = args['maxSubagents']
+  if (maxDepth !== undefined && (typeof maxDepth !== 'number' || !Number.isSafeInteger(maxDepth) || maxDepth < 1)) {
+    return 'maxDepth must be a positive safe integer.'
+  }
+  if (maxSubagents !== undefined && (typeof maxSubagents !== 'number' || !Number.isSafeInteger(maxSubagents) || maxSubagents < 1)) {
+    return 'maxSubagents must be a positive safe integer.'
+  }
+  return {
+    agentSession, task, acceptanceCriteria, expectedReturn,
+    ...subagentModel === undefined ? {} : { subagentModel },
+    ...reasoningEffort === undefined ? {} : { reasoningEffort: brandString<ReasoningEffortId>(reasoningEffort) },
+    ...maxDepth === undefined ? {} : { maxDepth },
+    ...maxSubagents === undefined ? {} : { maxSubagents },
+  }
+}
+
 /**
- * Build the MCP handler over one worker.
+ * Build the MCP handler over one worker. A failed, cancelled, or rejected delegation
+ * sets the MCP error flag and retains the delegation result text.
  * @param worker - the delegation service.
  * @returns a fetch-shaped MCP handler; call `close()` on teardown.
  */
@@ -121,25 +197,33 @@ export function createPetMcpHandler(worker: PetWorker): McpHttpHandler {
       capabilities: { tools: { listChanged: false } },
       instructions: INSTRUCTIONS,
     })
-    server.setRequestHandler('tools/list', () => ({ tools: [DELEGATE_TOOL] }))
+    server.setRequestHandler('tools/list', () => ({ tools: [LIST_MODELS_TOOL, DELEGATE_TOOL] }))
     server.setRequestHandler('tools/call', async (request, extra): Promise<CallToolResult> => {
-      if (request.params.name !== DELEGATE_TOOL.name) {
-        return failure(`unknown tool ${JSON.stringify(request.params.name)}`)
-      }
+      const { name } = request.params
       const args = request.params.arguments ?? {}
-      const codexSession = requiredString(args, 'codexSession')
-      const task = requiredString(args, 'task')
-      const acceptanceCriteria = requiredString(args, 'acceptanceCriteria')
-      const expectedReturn = requiredString(args, 'expectedReturn')
-      if (codexSession === undefined || task === undefined || acceptanceCriteria === undefined || expectedReturn === undefined) {
-        return failure('subagent_delegate requires non-empty codexSession, task, acceptanceCriteria, and expectedReturn strings.')
-      }
+      const signal = extra.mcpReq.signal
       try {
-        const outcome = await worker.delegate({ codexSession, task, acceptanceCriteria, expectedReturn }, extra.mcpReq.signal)
-        const result = text(outcomeText(outcome))
-        return outcome.status === 'completed' ? result : { ...result, isError: true }
+        if (name === LIST_MODELS_TOOL.name) {
+          const provider = requiredString(args, 'provider')?.trim()
+          const model = requiredString(args, 'model')?.trim()
+          if (provider === undefined && args['provider'] !== undefined) return failure('provider must be a non-empty string.')
+          if (model === undefined && args['model'] !== undefined) return failure('model must be a non-empty string.')
+          const catalog = await worker.listSubagentModels({
+            ...provider === undefined ? {} : { provider },
+            ...model === undefined ? {} : { model },
+          }, signal)
+          return { ...text(JSON.stringify(catalog)), structuredContent: { ...catalog } }
+        }
+        if (name === DELEGATE_TOOL.name) {
+          const input = delegateInput(args)
+          if (typeof input === 'string') return failure(input)
+          const outcome = await worker.delegate(input, signal)
+          const result = outcomeText(outcome)
+          return outcome.status !== 'completed' || outcome.acceptance?.accepted === false ? failure(result) : text(result)
+        }
+        return failure(`unknown tool ${JSON.stringify(name)}`)
       } catch (error) {
-        return failure(`subagent_delegate failed: ${error instanceof Error ? error.message : String(error)}`)
+        return failure(`${name} failed: ${error instanceof Error ? error.message : String(error)}`)
       }
     })
     return server

@@ -9,8 +9,8 @@
   en: c7cff3d7b433f593
   zh: a61d49cf676a3836
 /deepseek-ai-dsh-pet-app/summary:
-  en: e77caf030cc5206e
-  zh: 1e780903c15a7886
+  en: 4ff5a41a8304b1b1
+  zh: 6dffcaadf6977bfb
 /deepseek-ai-dsh-pet-app/table-of-contents:
   en: dcb583a860af8206
   zh: 5a33a92fe654c3f1
@@ -18,20 +18,20 @@
   en: bbff250eba0f1b89
   zh: 0a618f05cc88ee2b
 /deepseek-ai-dsh-pet-app/use-this-package/start-the-worker:
-  en: 09a29dd7436658ab
-  zh: ebcb508181f2b9e1
-/deepseek-ai-dsh-pet-app/use-this-package/connect-codex:
-  en: b6da62d400ba4e64
-  zh: 25dbd63844df5deb
+  en: 93e491dd5f35ee20
+  zh: e64b54b5b8dc77af
+/deepseek-ai-dsh-pet-app/use-this-package/connect-an-agent:
+  en: 21cfd1223948a145
+  zh: fdf31edc3e0d798f
 /deepseek-ai-dsh-pet-app/use-this-package/what-the-pet-shows:
-  en: 6ee763d33ebcbd53
-  zh: e046bfe84136750e
+  en: e6aab67705600472
+  zh: 11e4fb1b68e5aba3
 /deepseek-ai-dsh-pet-app/configuration:
-  en: e909e3a7cb2b77da
-  zh: 87d59c82a5f14356
+  en: 19abfe060860af61
+  zh: 6c4f20a5f3095b81
 /deepseek-ai-dsh-pet-app/understand-the-implementation:
-  en: 05253e2c4e11c539
-  zh: 4946109ed5fb3e4d
+  en: 7f7bf50c5b799fa1
+  zh: a2b5b7002294a905
 /deepseek-ai-dsh-pet-app/further-exploration:
   en: 5f451eb32b108f4e
   zh: 6611a13d3fda84e6
@@ -42,17 +42,17 @@
   en: b252ca511a13f0af
   zh: a7a83a57ea74a631
 /deepseek-ai-dsh-pet-app/model-experience/delegated-work/what-the-model-sees:
-  en: 1cc35d276f84a1d3
-  zh: 08ae86438e0d2048
+  en: 34b33db76da206e1
+  zh: a1b96d1f6eec4543
 /deepseek-ai-dsh-pet-app/model-experience/delegated-work/token-effect:
   en: b642699332ec082f
   zh: 70ecbae8e443c206
 /deepseek-ai-dsh-pet-app/model-experience/delegated-work/kv-cache-effect:
-  en: fc10a46e5debf445
-  zh: 2501556228e0d54e
+  en: e36b54d5ba3565c5
+  zh: 0081e839e614afd6
 /deepseek-ai-dsh-pet-app/known-limitations-and-deferred-work:
-  en: d4b393f80b92e557
-  zh: fbe0a580c8dad4e8
+  en: ad45aca47ef2314c
+  zh: a95a6bbcabba496d
 /deepseek-ai-dsh-pet-app/known-limitations-and-deferred-work/dev-note:
   en: f1ef63cc2370e2b4
   zh: a0f92f8905386a46

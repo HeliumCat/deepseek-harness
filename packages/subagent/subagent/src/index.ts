@@ -62,9 +62,11 @@ import type {
   SubagentRunInfo,
   SubagentSendMessageOptions,
   SubagentStartRequest,
+  SubagentTreePolicy,
 } from './types.ts'
 import { SubagentError } from './error.ts'
 import { assertSubagentMaxDepth } from './depth.ts'
+import { resolveChildDepth } from './child-agent.ts'
 import { createLifecycleEmitter } from './lifecycle.ts'
 import type { LifecycleEmitter } from './lifecycle.ts'
 import SubagentManager from './manager.ts'
@@ -96,6 +98,7 @@ export type {
   ResolvedSubagentStartRequest,
   SubagentStopReason,
   SubagentStopReasonMap,
+  SubagentTreePolicy,
 } from './types.ts'
 export {
   foldSubagentDescriptor,
@@ -190,6 +193,12 @@ export interface Config {
   maxDepth: Volatile<number>
 }
 
+interface ActiveTreePolicy {
+  readonly options: SubagentTreePolicy
+  /** Accepted activations and outstanding startup reservations. */
+  started: number
+}
+
 /** Named provider registry with managed activations, durable discovery, and local child messaging. */
 export class SubagentRuntime extends TypertRemoteService {
   static Config = z.object({
@@ -198,6 +207,7 @@ export class SubagentRuntime extends TypertRemoteService {
   })
   static inject = ['workingDirectory', 'sessionProjections']
   private providers = new Map<string, SubagentProvider>()
+  private readonly treePolicies = new Map<Agent, ActiveTreePolicy>()
   private manager: SubagentManager | undefined
   /**
    * The contained lifecycle-edge publisher. Built here because scoped dispatch
@@ -234,14 +244,45 @@ export class SubagentRuntime extends TypertRemoteService {
   /**
    * Resolve a delegation tool's depth policy against the current user setting.
    * @param configured - Explicit tool limit, or provider-managed for external delegation.
+   * @param parent - When supplied, use the scoped tree limit as the default and cap any explicit numeric limit.
    * @returns The numeric limit, or undefined when the provider owns depth enforcement.
    */
-  resolveMaxDepth(configured?: number | 'provider-managed'): number | undefined {
+  resolveMaxDepth(configured?: number | 'provider-managed', parent?: Agent): number | undefined {
     if (configured === 'provider-managed') return undefined
-    if (configured !== undefined) return configured
-    const depth = this.config.maxDepth.get()
+    const treeDepth = parent === undefined ? undefined : this.treePolicy(parent)?.options.maxDepth
+    if (configured !== undefined) return treeDepth === undefined ? configured : Math.min(configured, treeDepth)
+    const depth = treeDepth ?? this.config.maxDepth.get()
     assertSubagentMaxDepth(depth)
     return depth
+  }
+
+  /**
+   * Apply limits, model selection, and reasoning effort to new activations while an operation owns a live root.
+   * @param root - Exact live root of the affected tree.
+   * @param options - Tree-wide overrides and cumulative allowance for the operation.
+   * @param run - Operation that keeps ownership until all work within its policy settles.
+   * @returns The operation result after removing the policy.
+   * @throws If the caller is not the live root, it already has an active policy, or a limit is invalid.
+   */
+  async withTreePolicy<T>(root: Agent, options: SubagentTreePolicy, run: () => Promise<T>): Promise<T> {
+    if (options.maxDepth === undefined && options.maxSubagents === undefined
+      && options.subagentModel === undefined && options.reasoningEffort === undefined) return run()
+    if (this.rootOf(root) !== root) throw new SubagentError('subagent tree policy requires the live root agent', 'UNAUTHORIZED')
+    if (this.treePolicies.has(root)) throw new Error('subagent tree already has an active policy')
+    assertSubagentMaxDepth(options.maxDepth)
+    if (options.maxSubagents !== undefined && (!Number.isSafeInteger(options.maxSubagents) || options.maxSubagents < 0)) {
+      throw new RangeError('subagent maxSubagents must be a non-negative safe integer')
+    }
+    this.treePolicies.set(root, { options, started: 0 })
+    try {
+      return await run()
+    } finally {
+      this.treePolicies.delete(root)
+    }
+  }
+
+  private treePolicy(parent: Agent): ActiveTreePolicy | undefined {
+    return this.treePolicies.size === 0 ? undefined : this.treePolicies.get(this.rootOf(parent))
   }
 
   /**
@@ -270,25 +311,52 @@ export class SubagentRuntime extends TypertRemoteService {
       throw new SubagentError('reserved child ids require a local backend', 'UNSUPPORTED_CAPABILITY')
     }
     assertSubagentMaxDepth(spec.maxDepth)
-    this.assertCapabilities(provider, spec)
     const manager = this.requireManager()
     if (this.ctx.get('agents')?.get(spec.parent.id) !== spec.parent) {
       throw new SubagentError('subagent creation requires the exact live parent agent', 'UNAUTHORIZED')
     }
     if (spec.outputSchema !== undefined) assertObjectJsonSchema(spec.outputSchema)
-    const prepare = provider.prepareContinuable?.bind(provider)
-    if (prepare !== undefined) {
-      return manager.startLocal(spec, (request) => {
+    const policy = this.treePolicy(spec.parent)
+    const treeDepth = policy?.options.maxDepth
+    if (treeDepth !== undefined) {
+      const maxDepth = Math.min(spec.maxDepth ?? treeDepth, treeDepth)
+      resolveChildDepth(spec.parent, maxDepth)
+      spec = { ...spec, maxDepth }
+    }
+    const model = policy?.options.subagentModel
+    const reasoningEffort = policy?.options.reasoningEffort
+    if (model !== undefined || reasoningEffort !== undefined) {
+      const { reasoningEffort: _reasoningEffort, ...agentOptions } = spec.agentOptions ?? {}
+      spec = { ...spec, agentOptions: { ...agentOptions, ...model, ...reasoningEffort === undefined ? {} : { reasoningEffort } } }
+    }
+    this.assertCapabilities(provider, spec)
+    const start = (): Promise<SubagentActivation> => {
+      const prepare = provider.prepareContinuable?.bind(provider)
+      if (prepare !== undefined) {
+        return manager.startLocal(spec, (request) => {
+          this.assertProviderCurrent(provider)
+          return prepare(request)
+        })
+      }
+      // oxlint-disable-next-line typescript/no-non-null-assertion -- registerProvider requires start when prepareContinuable is absent.
+      const execute = provider.start!.bind(provider)
+      return manager.startExternal(spec, (request) => {
         this.assertProviderCurrent(provider)
-        return prepare(request)
+        return execute(request)
       })
     }
-    // oxlint-disable-next-line typescript/no-non-null-assertion -- registerProvider requires start when prepareContinuable is absent.
-    const start = provider.start!.bind(provider)
-    return manager.startExternal(spec, (request) => {
-      this.assertProviderCurrent(provider)
-      return start(request)
-    })
+    const limit = policy?.options.maxSubagents
+    if (policy === undefined || limit === undefined) return start()
+    if (policy.started >= limit) {
+      throw new SubagentError(`subagent creation limit (${limit}) reached for this delegation`, 'CREATION_LIMIT_REACHED')
+    }
+    policy.started++
+    try {
+      return await start()
+    } catch (error) {
+      policy.started--
+      throw error
+    }
   }
 
   /**

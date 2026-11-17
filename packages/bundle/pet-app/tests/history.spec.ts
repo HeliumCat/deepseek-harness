@@ -1,6 +1,6 @@
 /** History retention, grouping, and interrupted-run repair. */
 
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -19,10 +19,10 @@ afterEach(async () => {
   for (const directory of roots.splice(0)) await rm(directory, { recursive: true, force: true })
 })
 
-function record(id: string, dispatchedAt: number, codexSession = 'codex one'): DelegateRecord {
+function record(id: string, dispatchedAt: number, agentSession = 'agent one'): DelegateRecord {
   return {
     id,
-    codexSession,
+    agentSession,
     task: `task ${id}\nsecond line`,
     acceptanceCriteria: 'tests pass',
     expectedReturn: 'summary',
@@ -36,13 +36,13 @@ function record(id: string, dispatchedAt: number, codexSession = 'codex one'): D
 }
 
 describe('delegate history', () => {
-  it('retains and groups records by Codex conversation', async () => {
+  it('retains and groups records by Agent conversation', async () => {
     const store = new HistoryStore({ root: await root(), limit: 1000 })
     await store.open()
     const one = record('d-one', 1)
     one.status = 'completed'
     one.acceptance = { accepted: true, notes: 'ok', at: 2 }
-    const two = record('d-two', 2, 'codex two')
+    const two = record('d-two', 2, 'agent two')
     two.status = 'failed'
     await store.begin(one)
     await store.begin(two)
@@ -50,10 +50,41 @@ describe('delegate history', () => {
     await store.save(two)
     expect(store.size).toBe(2)
     const groups = store.groups()
-    expect(groups.map(group => group.codexSession)).toEqual(['codex two', 'codex one'])
+    expect(groups.map(group => group.agentSession)).toEqual(['agent two', 'agent one'])
     expect(groups[1]?.entries[0]?.taskPreview).toBe('task d-one')
     expect(groups[1]?.entries[0]?.accepted).toBe(true)
-    await expect(store.load('d-one')).resolves.toMatchObject({ codexSession: 'codex one', status: 'completed' })
+    await expect(store.load('d-one')).resolves.toMatchObject({ agentSession: 'agent one', status: 'completed' })
+  })
+
+  it('omits records that use the old conversation field', async () => {
+    const directory = await root()
+    const { agentSession, ...legacy } = record('d-old', 1)
+    const records = join(directory, 'records')
+    await mkdir(records)
+    const legacyPath = join(records, 'd-old.json')
+    const legacyDetail = JSON.stringify({
+      ...legacy, status: 'completed', codexSession: agentSession,
+    })
+    await writeFile(legacyPath, legacyDetail)
+    await writeFile(join(directory, 'index.json'), JSON.stringify([{
+      id: legacy.id, codexSession: agentSession, dispatchedAt: legacy.dispatchedAt,
+      status: 'completed', taskPreview: 'legacy task', subagentCount: 0,
+    }]))
+
+    const store = new HistoryStore({ root: directory, limit: 10 })
+    await store.open()
+    const current = record('d-new', 2, agentSession)
+    await store.begin(current)
+    current.status = 'completed'
+    await store.save(current)
+
+    const reopened = new HistoryStore({ root: directory, limit: 10 })
+    await reopened.open()
+    expect(reopened.groups()).toMatchObject([{
+      agentSession, count: 1, entries: [{ id: current.id, agentSession }],
+    }])
+    await expect(reopened.load(legacy.id)).resolves.toBeUndefined()
+    await expect(readFile(legacyPath, 'utf8')).resolves.toBe(legacyDetail)
   })
 
   it('evicts the oldest completed record when the cap is exceeded', async () => {

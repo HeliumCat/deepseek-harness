@@ -2,7 +2,7 @@
  * Capped delegation history. The index is one atomic JSON file; each record's
  * full transcript is a separate file so the retention cap can evict it without
  * rewriting the other records. The newest `limit` delegations are retained and
- * grouped by the caller-supplied Codex conversation name.
+ * grouped by the caller-supplied Agent conversation name.
  *
  * @module @deepseek-ai/dsh-pet-app/history
  */
@@ -75,7 +75,7 @@ function isSubagent(value: unknown): value is SubagentRecord {
 
 function isRecord(value: unknown): value is DelegateRecord {
   if (!isObject(value)) return false
-  if (typeof value.id !== 'string' || typeof value.codexSession !== 'string') return false
+  if (typeof value.id !== 'string' || typeof value.agentSession !== 'string') return false
   if (typeof value.task !== 'string' || typeof value.acceptanceCriteria !== 'string') return false
   if (typeof value.expectedReturn !== 'string' || typeof value.dispatchedAt !== 'number') return false
   if (!isStatus(value.status) || typeof value.mainSessionId !== 'string') return false
@@ -144,7 +144,7 @@ export class HistoryStore {
     }
     if (!Array.isArray(parsed)) return
     this.index = parsed.filter((entry): entry is HistoryEntry => isObject(entry)
-      && typeof entry.id === 'string' && typeof entry.codexSession === 'string'
+      && typeof entry.id === 'string' && typeof entry.agentSession === 'string'
       && typeof entry.dispatchedAt === 'number' && isStatus(entry.status)
       && typeof entry.taskPreview === 'string' && typeof entry.subagentCount === 'number')
     await this.repairInterrupted()
@@ -233,19 +233,19 @@ export class HistoryStore {
   }
 
   /**
-   * Records grouped by Codex conversation, newest group first.
+   * Records grouped by Agent conversation, newest group first.
    * @returns the grouped retained history.
    */
   groups(): HistoryGroup[] {
     const groups = new Map<string, HistoryEntry[]>()
     for (const entry of this.entries()) {
-      const list = groups.get(entry.codexSession)
-      if (list === undefined) groups.set(entry.codexSession, [entry])
+      const list = groups.get(entry.agentSession)
+      if (list === undefined) groups.set(entry.agentSession, [entry])
       else list.push(entry)
     }
     return [...groups.entries()]
-      .map(([codexSession, entries]) => ({
-        codexSession,
+      .map(([agentSession, entries]) => ({
+        agentSession,
         count: entries.length,
         latestAt: entries[0]?.dispatchedAt ?? 0,
         entries,
@@ -256,7 +256,7 @@ export class HistoryStore {
   private entryOf(record: DelegateRecord): HistoryEntry {
     return {
       id: record.id,
-      codexSession: record.codexSession,
+      agentSession: record.agentSession,
       dispatchedAt: record.dispatchedAt,
       ...record.completedAt === undefined ? {} : { completedAt: record.completedAt },
       status: record.status,

@@ -25,6 +25,7 @@ export const inject = [
   'agents',
   'agentPresets',
   'agentDefaultModel',
+  'llm',
   'sessions',
   'sessionPersistence',
   'subagents',
@@ -91,7 +92,7 @@ function codexSnippet(mcpUrl: string): string {
     `url = ${JSON.stringify(mcpUrl)}`,
     'startup_timeout_sec = 120',
     'tool_timeout_sec = 3600',
-    'enabled_tools = ["subagent_delegate"]',
+    'enabled_tools = ["list_subagent_models", "subagent_delegate"]',
   ].join('\n')
 }
 
@@ -126,7 +127,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
 
   console.log(`dsh pet: pet page ${urls.page}`)
   console.log(`dsh pet: MCP endpoint ${urls.mcp}`)
-  console.log('dsh pet: add this Codex MCP server entry:')
+  console.log('dsh pet: Codex configuration example:')
   console.log(codexSnippet(urls.mcp))
 
   const launch = (): void => {

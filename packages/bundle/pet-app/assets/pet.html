@@ -68,7 +68,7 @@
         </div>
         <button id="history-close" class="close" type="button" aria-label="Close">×</button>
       </header>
-      <div class="history-search"><input id="history-filter" type="search" placeholder="Filter by conversation or task"></div>
+      <div class="history-search"><input id="history-filter" type="search" placeholder="Filter by Agent conversation or task"></div>
       <div class="panel-body" id="history-body"></div>
     </section>
 
@@ -76,14 +76,15 @@
       <header class="panel-head">
         <div class="panel-identity">
           <span class="panel-icon">⚙</span>
-          <div><h1>Connect Codex</h1><p>Local Streamable HTTP MCP server</p></div>
+          <div><h1 data-i18n="configTitle">Connect an Agent</h1><p data-i18n="configTransport">Local Streamable HTTP MCP server</p></div>
         </div>
         <button id="config-close" class="close" type="button" aria-label="Close">×</button>
       </header>
       <div class="panel-body">
-        <p class="hint" data-i18n="config-hint">Add this server to <code>~/.codex/config.toml</code>. The URL already carries this worker's access token.</p>
-        <pre id="config-snippet" class="snippet"></pre>
-        <button id="copy-config" class="primary" type="button">Copy Codex config</button>
+        <p class="hint" data-i18n="configHint">Add this URL to your Agent’s MCP configuration. It includes the worker’s access token.</p>
+        <pre id="config-endpoint" class="snippet"></pre>
+        <button id="copy-endpoint" class="primary" type="button" data-i18n="copyEndpoint" disabled>Copy MCP URL</button>
+        <button id="copy-codex" class="chip" type="button" data-i18n="copyCodex" disabled>Copy Codex config</button>
         <p class="hint">The worker keeps running so the same endpoint stays available. Restarting <code>dsh --profile pet</code> keeps the token; deleting the token file issues a new one.</p>
       </div>
     </section>

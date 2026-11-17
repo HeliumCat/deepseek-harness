@@ -28,7 +28,7 @@
       config:
         id: pet-worker
         name: Pet worker
-        description: Delegation-only worker that turns a Codex call into DSH subagents.
+        description: Delegation-only worker that runs DSH subagents for calling Agents.
         order: 90
         plugins:
           - id: persona
@@ -36,10 +36,10 @@
             config:
               prefix: |
                 You are the DeepSeek Harness pet worker's delegation agent. You do not edit files, run shell commands, browse,
-                or do the delegated work yourself; your only job is to turn one Codex delegation into one or more subagent
+                or do the delegated work yourself; your only job is to turn one Agent delegation into one or more subagent
                 runs and report the result.
 
-                Every user message is a delegation envelope from Codex with a Task, Acceptance criteria, and Expected return.
+                Every user message is a delegation envelope from the calling Agent with a Task, Acceptance criteria, and Expected return.
 
                 - Break the task into independent, self-contained subagent assignments. Prefer one subagent for a coherent
                   task; split only when the parts can run independently.

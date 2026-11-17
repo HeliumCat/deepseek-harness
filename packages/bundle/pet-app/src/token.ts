@@ -1,6 +1,6 @@
 /**
  * The pet access token: one user-private random secret persisted under the
- * Harness home so Codex's config and the pet page URL stay stable across worker
+ * Harness home so the caller’s MCP configuration and the pet page URL stay stable across worker
  * restarts. Every pet route and the MCP endpoint require it.
  *
  * @module @deepseek-ai/dsh-pet-app/token
@@ -45,7 +45,7 @@ export async function ensurePetToken(path: string): Promise<string> {
 export interface PetUrls {
   /** Human-facing pet page. */
   readonly page: string
-  /** MCP endpoint Codex connects to. */
+  /** MCP endpoint for calling Agents. */
   readonly mcp: string
 }
 

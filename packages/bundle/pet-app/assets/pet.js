@@ -15,7 +15,7 @@ const LANG = (navigator.language || 'en').toLowerCase().startsWith('zh') ? 'zh' 
 const STRINGS = {
   en: {
     history: 'History',
-    bubbleIdle: 'Waiting for Codex',
+    bubbleIdle: 'Waiting for an Agent call',
     bubbleAnalyzing: 'Analyzing a delegation…',
     bubbleWorking: (n) => `${n} subagent${n === 1 ? '' : 's'} working`,
     bubbleOffline: 'Worker offline — retrying…',
@@ -23,7 +23,7 @@ const STRINGS = {
     overview: 'Overview',
     run: 'Run',
     result: 'Result',
-    delegate: 'Codex delegation',
+    delegate: 'Agent delegation',
     dispatch: 'Dispatched',
     acceptance: 'Acceptance',
     subagents: 'Subagents',
@@ -38,13 +38,17 @@ const STRINGS = {
     notRecorded: 'Not recorded',
     historyTitle: 'Delegation history',
     historyMeta: (count, limit) => `${count} retained · cap ${limit}`,
-    filter: 'Filter by conversation or task',
+    filter: 'Filter by Agent conversation or task',
     noHistory: 'No delegations have been recorded yet.',
     emptyGroup: 'No records match this filter.',
-    configTitle: 'Connect Codex',
-    configHint: 'Add this server to ~/.codex/config.toml. The URL already carries this worker\'s access token.',
-    copy: 'Copy Codex config',
-    copied: 'Codex config copied',
+    configTitle: 'Connect an Agent',
+    configTransport: 'Local Streamable HTTP MCP server',
+    configHint: 'Add this URL to your Agent’s MCP configuration. It includes the worker’s access token.',
+    copyEndpoint: 'Copy MCP URL',
+    endpointCopied: 'MCP URL copied',
+    copyCodex: 'Copy Codex config',
+    codexCopied: 'Codex config copied',
+    caller: 'Agent',
     waitFirst: 'Waiting for the first message…',
     waitingResult: 'The worker is still running. The result appears here when it settles.',
     mainSession: 'Worker session',
@@ -59,7 +63,7 @@ const STRINGS = {
   },
   zh: {
     history: '历史',
-    bubbleIdle: '等待 Codex 调用',
+    bubbleIdle: '等待 Agent 调用',
     bubbleAnalyzing: '正在分析 delegate…',
     bubbleWorking: (n) => `${n} 个 subagent 正在工作`,
     bubbleOffline: 'worker 已离线，正在重试…',
@@ -67,7 +71,7 @@ const STRINGS = {
     overview: '概览',
     run: '运行过程',
     result: '返回结果',
-    delegate: 'Codex 派发内容',
+    delegate: 'Agent 派发内容',
     dispatch: '派发时间',
     acceptance: '验收情况',
     subagents: 'Subagents',
@@ -82,13 +86,17 @@ const STRINGS = {
     notRecorded: '未记录',
     historyTitle: '派发历史',
     historyMeta: (count, limit) => `保留 ${count} 条 · 上限 ${limit}`,
-    filter: '按 Codex session 或任务过滤',
+    filter: '按 Agent 会话或任务过滤',
     noHistory: '还没有任何派发记录。',
     emptyGroup: '没有匹配的记录。',
-    configTitle: '连接 Codex',
-    configHint: '把下面的配置加到 ~/.codex/config.toml。URL 已包含这个 worker 的访问 token。',
-    copy: '复制 Codex 配置',
-    copied: '已复制 Codex 配置',
+    configTitle: '连接 Agent',
+    configTransport: '本机 Streamable HTTP MCP 服务',
+    configHint: '将此 URL 添加到 Agent 的 MCP 配置中。URL 已包含 worker 的访问 token。',
+    copyEndpoint: '复制 MCP URL',
+    endpointCopied: '已复制 MCP URL',
+    copyCodex: '复制 Codex 配置',
+    codexCopied: '已复制 Codex 配置',
+    caller: 'Agent',
     waitFirst: '等待第一条消息…',
     waitingResult: 'worker 仍在运行，结束后结果显示在这里。',
     mainSession: '主 Agent session',
@@ -126,8 +134,9 @@ const dom = {
   historyFilter: $('history-filter'),
   configView: $('config-view'),
   configClose: $('config-close'),
-  configSnippet: $('config-snippet'),
-  copyConfig: $('copy-config'),
+  configEndpoint: $('config-endpoint'),
+  copyEndpoint: $('copy-endpoint'),
+  copyCodex: $('copy-codex'),
   toast: $('toast'),
 }
 
@@ -137,6 +146,7 @@ const state = {
   detailId: null,
   focusSubagent: null,
   tab: 'overview',
+  runExpansion: new Map(),
   history: null,
   filter: '',
   icons: new Map(),
@@ -153,6 +163,7 @@ for (const element of document.querySelectorAll('[data-i18n]')) {
   const key = element.getAttribute('data-i18n')
   if (key !== null && typeof t[key] === 'string') element.textContent = t[key]
 }
+dom.historyFilter.placeholder = t.filter
 
 function statusLabel(status) {
   return (t.status && t.status[status]) || status
@@ -288,7 +299,7 @@ function renderIcons() {
     node.style.setProperty('--radius', `${radius}px`)
     node.style.setProperty('--ring', subagent.color)
     node.textContent = subagent.icon
-    node.title = `${subagent.label || subagent.name} · ${subagent.codexSession}`
+    node.title = `${subagent.label || subagent.name} · ${subagent.agentSession}`
   })
   return active.length
 }
@@ -368,62 +379,72 @@ function renderSubagentRow(subagent, onClick) {
   return row
 }
 
-function renderEntry(entry, roleHint) {
+function bindRunExpansion(control, key, defaultOpen, apply) {
+  control.dataset.expansionKey = key
+  let open = state.runExpansion.get(key) ?? defaultOpen
+  apply(open)
+  control.addEventListener('click', (event) => {
+    event.preventDefault()
+    open = !open
+    state.runExpansion.set(key, open)
+    apply(open)
+  })
+}
+
+function renderEntryText(wrap, value, key, limit, isError = false) {
+  const text = el('div', `entry-text${isError ? ' error' : ''}`, value)
+  wrap.append(text)
+  if (value.length <= limit) return
+  const toggle = el('button', 'entry-toggle')
+  toggle.type = 'button'
+  bindRunExpansion(toggle, key, false, (open) => {
+    text.classList.toggle('clamp', !open)
+    toggle.textContent = open ? t.showLess : t.showMore
+    toggle.setAttribute('aria-expanded', String(open))
+  })
+  wrap.append(toggle)
+}
+
+function renderEntryDetails(label, value, key) {
+  const details = document.createElement('details')
+  const summary = el('summary', '', label)
+  bindRunExpansion(summary, key, false, (open) => { details.open = open })
+  details.append(summary, el('pre', '', value))
+  return details
+}
+
+function renderEntry(entry, roleHint, key) {
   if (entry.kind === 'status') return el('div', 'entry status', entry.label)
   const wrap = el('div', `entry ${entry.kind}`)
   const head = el('div', 'entry-head')
-  const role = entry.kind === 'user' ? (roleHint === 'main' ? 'Codex' : 'User') : entry.kind === 'assistant' ? (roleHint === 'main' ? 'Worker' : 'Subagent') : 'Tool'
+  const role = entry.kind === 'user' ? (roleHint === 'main' ? t.caller : 'User') : entry.kind === 'assistant' ? (roleHint === 'main' ? 'Worker' : 'Subagent') : 'Tool'
   head.append(el('span', 'entry-role', role))
   if (entry.kind === 'tool') head.append(el('span', '', entry.name || entry.callId))
   head.append(el('span', '', relativeTime(entry.at)))
   wrap.append(head)
   if (entry.kind === 'tool') {
-    const text = el('div', `entry-text${entry.isError ? ' error' : ''}`, entry.text || '(empty result)')
-    wrap.append(text)
-    if (entry.text.length > 1_200) {
-      text.classList.add('clamp')
-      const toggle = el('button', 'entry-toggle', t.showMore)
-      toggle.addEventListener('click', () => {
-        const open = text.classList.toggle('clamp') === false
-        toggle.textContent = open ? t.showLess : t.showMore
-      })
-      wrap.append(toggle)
-    }
+    renderEntryText(wrap, entry.text || '(empty result)', `${key}:text`, 1_200, entry.isError)
     return wrap
   }
-  if (entry.text) {
-    const text = el('div', 'entry-text', entry.text)
-    if (entry.text.length > 1_800) {
-      text.classList.add('clamp')
-      const toggle = el('button', 'entry-toggle', t.showMore)
-      toggle.addEventListener('click', () => {
-        const open = text.classList.toggle('clamp') === false
-        toggle.textContent = open ? t.showLess : t.showMore
-      })
-      wrap.append(text, toggle)
-    } else wrap.append(text)
-  }
+  if (entry.text) renderEntryText(wrap, entry.text, `${key}:text`, 1_800)
   if (entry.kind === 'assistant' && entry.reasoning) {
-    const details = document.createElement('details')
-    details.append(el('summary', '', t.reasoning))
-    details.append(el('pre', '', entry.reasoning))
-    wrap.append(details)
+    wrap.append(renderEntryDetails(t.reasoning, entry.reasoning, `${key}:reasoning`))
   }
   if (entry.kind === 'assistant' && Array.isArray(entry.tools)) {
     for (const tool of entry.tools) {
-      const details = document.createElement('details')
-      details.append(el('summary', '', `${tool.name} · ${t.arguments}`))
-      details.append(el('pre', '', tool.arguments))
-      wrap.append(details)
+      wrap.append(renderEntryDetails(`${tool.name} · ${t.arguments}`, tool.arguments, `${key}:tool:${tool.callId}`))
     }
   }
   return wrap
 }
 
-function renderTranscript(entries, roleHint) {
+function renderTranscript(entries, roleHint, sessionId) {
   const list = el('div', 'transcript')
   if (entries.length === 0) list.append(el('div', 'empty', t.waitFirst))
-  for (const entry of entries) list.append(renderEntry(entry, roleHint))
+  // Committed transcript entries are appended in log order.
+  for (const [index, entry] of entries.entries()) {
+    list.append(renderEntry(entry, roleHint, JSON.stringify([sessionId, index])))
+  }
   return list
 }
 
@@ -457,7 +478,11 @@ function renderOverview(record) {
   const subagents = section(t.subagents)
   if (record.subagents.length === 0) subagents.append(el('div', 'empty', t.waitFirst))
   for (const subagent of record.subagents) {
-    subagents.append(renderSubagentRow(subagent, () => { state.focusSubagent = subagent.sessionId; setTab('run') }))
+    subagents.append(renderSubagentRow(subagent, () => {
+      state.focusSubagent = subagent.sessionId
+      state.runExpansion.set(`subagent:${subagent.sessionId}`, true)
+      setTab('run')
+    }))
   }
   fragment.append(subagents)
   return fragment
@@ -466,13 +491,14 @@ function renderOverview(record) {
 function renderRun(record) {
   const fragment = document.createDocumentFragment()
   const main = section(t.mainRun)
-  main.append(renderTranscript(record.transcript, 'main'))
+  main.append(renderTranscript(record.transcript, 'main', record.mainSessionId))
   fragment.append(main)
   for (const subagent of record.subagents) {
     const details = document.createElement('details')
     details.className = 'subagent-block'
-    details.open = state.focusSubagent === subagent.sessionId || subagent.status === 'running'
     const summary = el('summary')
+    const defaultOpen = state.focusSubagent === subagent.sessionId || subagent.status === 'running'
+    bindRunExpansion(summary, `subagent:${subagent.sessionId}`, defaultOpen, (open) => { details.open = open })
     const avatar = el('span', 'subagent-avatar', subagent.icon)
     avatar.style.setProperty('--ring', subagent.color)
     avatar.style.width = '24px'
@@ -482,7 +508,7 @@ function renderRun(record) {
     summary.append(el('span', 'badge ' + badgeClass(subagentStatusClass(subagent)), subStatusLabel(subagent.status)))
     summary.append(el('span', 'chev', '›'))
     details.append(summary)
-    details.append(renderTranscript(subagent.transcript, 'subagent'))
+    details.append(renderTranscript(subagent.transcript, 'subagent', subagent.sessionId))
     fragment.append(details)
   }
   return fragment
@@ -517,13 +543,20 @@ function renderPanel() {
   const focused = record.subagents.find(subagent => subagent.sessionId === state.focusSubagent)
   dom.panelIcon.textContent = focused === undefined ? '🐳' : focused.icon
   dom.panelIcon.style.setProperty('--ring', focused === undefined ? '#6ea8ff' : focused.color)
-  dom.panelName.textContent = focused === undefined ? record.codexSession : (focused.label || focused.name)
-  dom.panelMeta.textContent = `${record.codexSession} · ${statusLabel(record.status)} · ${relativeTime(record.dispatchedAt)}`
+  dom.panelName.textContent = focused === undefined ? record.agentSession : (focused.label || focused.name)
+  dom.panelMeta.textContent = `${record.agentSession} · ${statusLabel(record.status)} · ${relativeTime(record.dispatchedAt)}`
   const scrollTop = dom.panelBody.scrollTop
+  const active = document.activeElement
+  const expansionKey = dom.panelBody.contains(active) ? active.dataset.expansionKey : undefined
   dom.panelBody.replaceChildren()
   if (state.tab === 'overview') dom.panelBody.append(renderOverview(record))
   else if (state.tab === 'run') dom.panelBody.append(renderRun(record))
   else dom.panelBody.append(renderResult(record))
+  if (expansionKey !== undefined) {
+    const control = Array.from(dom.panelBody.querySelectorAll('[data-expansion-key]'))
+      .find(node => node.dataset.expansionKey === expansionKey)
+    control?.focus({ preventScroll: true })
+  }
   dom.panelBody.scrollTop = scrollTop
   for (const button of dom.panel.querySelectorAll('.tab')) {
     button.classList.toggle('active', button.getAttribute('data-tab') === state.tab)
@@ -536,9 +569,11 @@ function setTab(tab) {
 }
 
 async function loadDetail() {
-  if (state.detailId === null) return
+  const detailId = state.detailId
+  if (detailId === null) return
   try {
-    const detail = await getJson(`delegates/${encodeURIComponent(state.detailId)}`)
+    const detail = await getJson(`delegates/${encodeURIComponent(detailId)}`)
+    if (detailId !== state.detailId) return
     state.detail = detail
     renderPanel()
   } catch (error) {
@@ -553,6 +588,7 @@ function startDetailPoll() {
 
 async function openDelegate(delegateId, subagentId) {
   state.detailId = delegateId
+  state.runExpansion.clear()
   state.focusSubagent = subagentId || null
   state.detail = null
   state.tab = 'overview'
@@ -585,13 +621,13 @@ function renderHistory() {
   let shown = 0
   for (const group of state.history.groups) {
     const entries = group.entries.filter(entry => filter === ''
-      || group.codexSession.toLowerCase().includes(filter)
+      || group.agentSession.toLowerCase().includes(filter)
       || entry.taskPreview.toLowerCase().includes(filter))
     if (entries.length === 0) continue
     shown += entries.length
     const block = el('div', 'group')
     const head = el('div', 'group-head')
-    head.append(el('span', '', group.codexSession), el('span', 'group-count', `${group.count}`))
+    head.append(el('span', '', group.agentSession), el('span', 'group-count', `${group.count}`))
     block.append(head)
     for (const entry of entries) {
       const row = el('button', 'history-row')
@@ -625,19 +661,21 @@ async function openHistory() {
   }
 }
 
-function codexSnippet() {
-  const mcpUrl = state.snapshot === null ? '' : state.snapshot.mcpUrl
+function codexSnippet(mcpUrl) {
   return [
     '[mcp_servers.dsh_pet]',
     `url = ${JSON.stringify(mcpUrl)}`,
     'startup_timeout_sec = 120',
     'tool_timeout_sec = 3600',
-    'enabled_tools = ["subagent_delegate"]',
+    'enabled_tools = ["list_subagent_models", "subagent_delegate"]',
   ].join('\n')
 }
 
 function renderConfig() {
-  dom.configSnippet.textContent = codexSnippet()
+  const mcpUrl = state.snapshot?.mcpUrl ?? ''
+  dom.configEndpoint.textContent = mcpUrl
+  dom.copyEndpoint.disabled = mcpUrl === ''
+  dom.copyCodex.disabled = mcpUrl === ''
 }
 
 function openConfig() {
@@ -645,10 +683,10 @@ function openConfig() {
   renderConfig()
 }
 
-async function copyConfig() {
+async function copyConfig(value, message) {
   try {
-    await navigator.clipboard.writeText(codexSnippet())
-    toast(t.copied)
+    await navigator.clipboard.writeText(value)
+    toast(message)
   } catch {
     toast(t.copyFailed)
   }
@@ -659,7 +697,8 @@ dom.configButton.addEventListener('click', openConfig)
 dom.panelClose.addEventListener('click', closePanel)
 dom.historyClose.addEventListener('click', () => { state.history = null; showOnly('none') })
 dom.configClose.addEventListener('click', () => { showOnly('none') })
-dom.copyConfig.addEventListener('click', () => { void copyConfig() })
+dom.copyEndpoint.addEventListener('click', () => { void copyConfig(dom.configEndpoint.textContent, t.endpointCopied) })
+dom.copyCodex.addEventListener('click', () => { void copyConfig(codexSnippet(dom.configEndpoint.textContent), t.codexCopied) })
 dom.historyFilter.addEventListener('input', () => {
   state.filter = dom.historyFilter.value
   renderHistory()
