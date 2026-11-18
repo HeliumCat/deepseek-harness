@@ -8,6 +8,7 @@
 
 import type { SubagentTreePolicy } from '@deepseek-ai/dsh-subagent'
 import type { LlmModelReasoningInfo } from '@deepseek-ai/dsh-llm'
+import type { Branded } from '@deepseek-ai/dsh-brand'
 
 /** One delegated task normalized from an MCP tool call. */
 export interface DelegateInput extends SubagentTreePolicy {
@@ -15,7 +16,7 @@ export interface DelegateInput extends SubagentTreePolicy {
   readonly agentSession: string
   /** The task the caller delegates. */
   readonly task: string
-  /** How the worker must judge whether the task succeeded. */
+  /** The calling Agent's independent checks, methods, and expected results. */
   readonly acceptanceCriteria: string
   /** The content the caller expects back. */
   readonly expectedReturn: string
@@ -37,6 +38,7 @@ export interface PetModelCatalog {
 
 /** Terminal or in-flight state of one delegation. */
 export type DelegateStatus =
+  | 'scheduled'
   | 'queued'
   | 'running'
   | 'completed'
@@ -88,26 +90,13 @@ export interface TranscriptToolCall {
   readonly arguments: string
 }
 
-/** A verdict the worker main agent records through `pet_acceptance`. */
-export interface AcceptanceVerdict {
-  /** Whether the subagent output satisfies the delegate's acceptance criteria. */
-  readonly accepted: boolean
-  /** The worker's one-paragraph acceptance notes. */
-  readonly notes: string
-}
-
-/** One acceptance verdict with its recording time. */
-export interface StoredAcceptance extends AcceptanceVerdict {
-  readonly at: number
-}
-
 /** One child run tracked for a delegation. */
 export interface SubagentRecord {
   /** Provider run identity shared by the start/end lifecycle pair. */
   readonly runId: string
   /** Child Session id. */
   readonly sessionId: string
-  /** Direct creator Session id (the worker session or another child session). */
+  /** Direct creator Session id (the lead subagent or another execution subagent). */
   readonly parentSessionId: string
   /** Model-facing tree name when the subagent manager could resolve one. */
   readonly name: string
@@ -144,21 +133,23 @@ export interface DelegateRecord extends SubagentTreePolicy {
   readonly expectedReturn: string
   /** Epoch milliseconds at dispatch. */
   readonly dispatchedAt: number
+  /** Requested start time in epoch milliseconds for a scheduled delegation. */
+  readonly scheduledAt?: number
+  /** Recurring plan that produced this delegation, when applicable. */
+  readonly scheduleId?: PetScheduleId
   /** Epoch milliseconds when the record reached a terminal state. */
   completedAt?: number
   /** Delegation state. */
   status: DelegateStatus
-  /** Worker main-agent Session id. */
+  /** Lead subagent Session id, stored under the existing history field name. */
   readonly mainSessionId: string
   /** Absolute directory the worker ran in when the delegation was dispatched. */
   readonly workspace: string
-  /** Normalized worker transcript, including the delegate envelope and subagent tool calls. */
+  /** The lead subagent's forwarding record and any Session transcript entries. */
   readonly transcript: TranscriptEntry[]
   /** Child runs in start order. */
   readonly subagents: SubagentRecord[]
-  /** Worker verdict, or absent when the worker never recorded one. */
-  acceptance?: StoredAcceptance
-  /** Final returned text and how the worker turn ended. */
+  /** Execution subagent output and stop reason. */
   result?: {
     readonly text: string
     readonly stopReason: string
@@ -166,6 +157,28 @@ export interface DelegateRecord extends SubagentTreePolicy {
   /** Failure detail for a failed or cancelled delegation. */
   error?: string
 }
+
+/** A persisted delegation with a requested start time. */
+export type ScheduledDelegateRecord = DelegateRecord & { readonly scheduledAt: number }
+
+/** One-time start condition, validated at the caller boundary. */
+export type DelegateScheduleTiming = { readonly runAt: number } | { readonly delaySeconds: number }
+
+/** Fixed-rate timing and optional bounds for a recurring plan. */
+export interface RecurringScheduleTiming {
+  /** Seconds between planned starts. */
+  readonly everySeconds: number
+  /** Seconds from admission through the last eligible planned start. */
+  readonly durationSeconds?: number
+  /** Number of delegations the plan may admit. */
+  readonly maxRuns?: number
+}
+
+/** Durable identifier for a recurring Pet schedule. */
+export type PetScheduleId = Branded<'PetScheduleId'>
+
+/** Management operation for an existing recurring Pet schedule. */
+export type PetScheduleAction = 'view' | 'pause' | 'resume' | 'stop'
 
 /** One compact row in the capped history index. */
 export interface HistoryEntry {
@@ -175,6 +188,10 @@ export interface HistoryEntry {
   readonly agentSession: string
   /** Epoch milliseconds at dispatch. */
   readonly dispatchedAt: number
+  /** Requested start time in epoch milliseconds for a scheduled delegation. */
+  readonly scheduledAt?: number
+  /** Recurring plan that produced this delegation, when applicable. */
+  readonly scheduleId?: PetScheduleId
   /** Epoch milliseconds at settlement. */
   readonly completedAt?: number
   /** Delegation state. */
@@ -183,8 +200,6 @@ export interface HistoryEntry {
   readonly taskPreview: string
   /** Number of child runs. */
   readonly subagentCount: number
-  /** Recorded acceptance, when the worker provided one. */
-  readonly accepted?: boolean
 }
 
 /** One Agent conversation's slice of the history list. */
@@ -242,12 +257,10 @@ export interface DelegateOutcome {
   /** Pet-local record identity. */
   readonly id: string
   /** Terminal delegation state. */
-  readonly status: DelegateStatus
-  /** Worker verdict, or undefined when the worker did not record one. */
-  readonly acceptance: AcceptanceVerdict | undefined
-  /** Final returned text. */
+  readonly status: Extract<DelegateStatus, 'completed' | 'failed' | 'cancelled'>
+  /** Final text from the direct execution subagent. */
   readonly text: string
-  /** Why the worker turn ended. */
+  /** Why the execution ended. */
   readonly stopReason: string
   /** Failure detail for a failed or cancelled delegation. */
   readonly error?: string

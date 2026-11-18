@@ -1,4 +1,4 @@
-/** Run panel interactions while the worker transcript is refreshed. */
+/** Delegation detail interactions while the worker record is refreshed. */
 
 import { readFileSync } from 'node:fs'
 import { JSDOM } from 'jsdom'
@@ -8,7 +8,7 @@ import type { DelegateRecord } from '../src/types.ts'
 const html = readFileSync(new URL('../assets/pet.html', import.meta.url), 'utf8')
 const script = readFileSync(new URL('../assets/pet.js', import.meta.url), 'utf8')
 
-it('retains Run expansion choices across detail polls', async () => {
+it('retains Run expansion and Result scroll across detail polls', async () => {
   const at = Date.now()
   const record: DelegateRecord = {
     id: 'd-one', agentSession: 'conversation', task: 'task', acceptanceCriteria: 'criteria',
@@ -31,14 +31,15 @@ it('retains Run expansion choices across detail polls', async () => {
     beforeParse(window) {
       window.setInterval = (handler, delay = 0) => {
         if (typeof handler !== 'function') throw new Error('Expected a poll callback')
-        polls.set(delay, () => { handler() })
+        polls.set(delay, handler as () => void)
         return delay
       }
       window.clearInterval = (id) => {
         if (id !== undefined) polls.delete(id)
       }
       window.fetch = async (input) => {
-        const path = new URL(String(input)).pathname
+        if (!(input instanceof window.URL)) throw new Error('Expected a poll URL')
+        const path = input.pathname
         if (path === '/pet/api/delegates/d-one') return Response.json(record)
         if (path === '/pet/api/history') return Response.json({
           count: 1, limit: 1_000, groups: [{ agentSession: record.agentSession, count: 1, entries: [{
@@ -50,25 +51,34 @@ it('retains Run expansion choices across detail polls', async () => {
       }
     },
   })
-  const find = <T extends HTMLElement>(selector: string): T => {
-    const element = window.document.querySelector<T>(selector)
+  const find = (selector: string): HTMLElement => {
+    const element = window.document.querySelector<HTMLElement>(selector)
     if (element === null) throw new Error(`Missing ${selector}`)
     return element
   }
-  const refresh = async (label: string) => {
-    record.transcript.push({ kind: 'status', at, label })
+  const isOpen = (selector: string): boolean => {
+    const element = find(selector)
+    if (!(element instanceof window.HTMLDetailsElement)) throw new Error(`Expected details at ${selector}`)
+    return element.open
+  }
+  const pollDetail = () => {
     const poll = polls.get(1_200)
     if (poll === undefined) throw new Error('Detail poll did not start')
     poll()
-    await vi.waitFor(() => expect(find('.entry.status:last-child').textContent).toBe(label))
+  }
+  const refresh = async (label: string) => {
+    record.transcript.push({ kind: 'status', at, label })
+    pollDetail()
+    await vi.waitFor(() => { expect(find('.entry.status:last-child').textContent).toBe(label) })
   }
 
   try {
     window.eval(script)
     find('#history-button').click()
-    await vi.waitFor(() => find('.history-row').click())
-    await vi.waitFor(() => expect(find('#panel-name').textContent).toBe(record.agentSession))
+    await vi.waitFor(() => { find('.history-row').click() })
+    await vi.waitFor(() => { expect(find('#panel-name').textContent).toBe(record.agentSession) })
     find('[data-tab="run"]').click()
+    expect(find('#panel-body .section-title').textContent).toBe('Lead subagent')
 
     const summaries = ['.assistant details:first-of-type', '.assistant details:last-of-type']
     const longTexts = ['.assistant', '.tool']
@@ -78,9 +88,9 @@ it('retains Run expansion choices across detail polls', async () => {
     find('.assistant .entry-toggle').focus()
 
     await refresh('First refresh')
-    for (const selector of summaries) expect(find<HTMLDetailsElement>(selector).open).toBe(true)
+    for (const selector of summaries) expect(isOpen(selector)).toBe(true)
     for (const selector of longTexts) expect(find(`${selector} .entry-text`).classList.contains('clamp')).toBe(false)
-    expect(find<HTMLDetailsElement>('.subagent-block').open).toBe(false)
+    expect(isOpen('.subagent-block')).toBe(false)
     expect(window.document.activeElement).toBe(find('.assistant .entry-toggle'))
 
     for (const selector of summaries) find(`${selector} summary`).click()
@@ -91,9 +101,24 @@ it('retains Run expansion choices across detail polls', async () => {
     child.status = 'completed'
 
     await refresh('Second refresh')
-    for (const selector of summaries) expect(find<HTMLDetailsElement>(selector).open).toBe(false)
+    for (const selector of summaries) expect(isOpen(selector)).toBe(false)
     for (const selector of longTexts) expect(find(`${selector} .entry-text`).classList.contains('clamp')).toBe(true)
-    expect(find<HTMLDetailsElement>('.subagent-block').open).toBe(true)
+    expect(isOpen('.subagent-block')).toBe(true)
+
+    find('[data-tab="result"]').click()
+    expect(find('#panel-body .empty').textContent).toContain('result')
+    record.status = 'completed'
+    record.result = { text: 'Result line\n'.repeat(250), stopReason: 'completed' }
+    pollDetail()
+    await vi.waitFor(() => { expect(find('.result-text').textContent).toBe(record.result?.text) })
+
+    const resultText = find('.result-text')
+    resultText.scrollTop = 300
+    window.Date.now = () => at + 6_500
+    pollDetail()
+    await vi.waitFor(() => { expect(find('#panel-meta').textContent).toContain('6s ago') })
+    expect(find('.result-text')).toBe(resultText)
+    expect(resultText.scrollTop).toBe(300)
   } finally {
     window.close()
   }

@@ -1,10 +1,9 @@
 import { defineConfig } from 'tsdown'
 
-/** Bundle the worker frontend and the separate acceptance tool preset row. */
+/** Bundle the worker frontend. */
 export default defineConfig({
   entry: {
     index: 'lib/types/index.js',
-    acceptance: 'lib/types/acceptance.js',
   },
   outDir: 'lib',
   format: ['esm'],

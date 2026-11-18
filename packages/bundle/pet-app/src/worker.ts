@@ -1,9 +1,7 @@
 /**
  * The worker that turns one Agent delegation into one durable worker
- * conversation and its subagent tree. The worker main agent analyzes the
- * delegation and spawns subagents; this service records the delegate envelope,
- * the live subagent set, the normalized transcripts, the acceptance verdict,
- * and the returned text into the capped history.
+ * conversation and its subagent tree. The lead subagent starts one assignment
+ * exactly as supplied by the calling Agent and tracks the run in Pet history.
  *
  * @module @deepseek-ai/dsh-pet-app/worker
  */
@@ -15,24 +13,30 @@ import { installModelSelection, type Agent, type AgentHandle, type AgentOptions,
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type {} from '@deepseek-ai/dsh-agent-preset-registry'
 import { brandString } from '@deepseek-ai/dsh-brand'
-import { createUserMessage, LlmError, type LlmResolvedModelInfo, type ReasoningEffortId } from '@deepseek-ai/dsh-llm'
-import type { SessionEvent, SessionId, TurnEndReason } from '@deepseek-ai/dsh-session'
+import { LlmError, type LlmResolvedModelInfo, type ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import type { SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-persistence'
-import { SubagentError, type SubagentRunEndInfo, type SubagentRunInfo } from '@deepseek-ai/dsh-subagent'
-import { ToolArgsError, ToolContextUnavailableError } from '@deepseek-ai/dsh-tools'
+import { SubagentError, type SubagentResult, type SubagentRunEndInfo, type SubagentRunInfo } from '@deepseek-ai/dsh-subagent'
+import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
+import { ToolArgsError } from '@deepseek-ai/dsh-tools'
 import { HistoryStore, newDelegateId } from './history.ts'
+import { RecurringSchedules, type RecurringPlan } from './recurring-schedules.ts'
 import { finalAssistantText, textOf, TranscriptBuilder } from './transcript.ts'
 import type {
-  AcceptanceVerdict,
   ActiveDelegateSnapshot,
   ActiveSubagentSnapshot,
   DelegateDetail,
   DelegateInput,
   DelegateOutcome,
+  DelegateScheduleTiming,
   DelegateRecord,
   HistoryGroup,
   PetModelCatalog,
+  PetScheduleAction,
+  PetScheduleId,
   PetSnapshot,
+  RecurringScheduleTiming,
+  ScheduledDelegateRecord,
   SubagentRecord,
   SubagentStatus,
   TranscriptEntry,
@@ -40,7 +44,7 @@ import type {
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
-    /** The pet worker all delegation routes and the acceptance tool read. */
+    /** The pet worker that serves delegation routes and history. */
     petWorker: PetWorker
   }
 }
@@ -69,8 +73,12 @@ export interface PetWorkerOptions {
   readonly historyRoot: string
   /** Maximum retained delegations. */
   readonly historyLimit: number
-  /** Agent preset mounted for the worker main agent. */
+  /** Preset for the Pet lead subagent holding the tree and history. */
   readonly presetId: string
+  /** Preset mounted for the direct execution subagent. */
+  readonly childPresetId: string
+  /** Model route for every new execution subagent when the caller omits one. */
+  readonly defaultSubagentModel: NonNullable<DelegateInput['subagentModel']>
   /** MCP endpoint advertised to calling Agents, including its access token. */
   readonly mcpUrl: string
   /** Pet page URL advertised to the desktop window and history page. */
@@ -105,11 +113,11 @@ interface TrackedSession {
 }
 
 /**
- * Resolve a worker session id from a human-readable Agent conversation name.
+ * Resolve the lead subagent Session id from the calling Agent's conversation name.
  * @param agentSession - the caller-supplied Agent conversation name.
- * @returns the deterministic worker Session id.
+ * @returns the deterministic lead subagent Session id.
  */
-export function workerSessionId(agentSession: string): SessionId {
+export function leadSessionId(agentSession: string): SessionId {
   const digest = createHash('sha256').update(agentSession).digest('hex')
   return brandString<SessionId>(`pet-${digest.slice(0, 32)}`)
 }
@@ -135,23 +143,6 @@ function subagentStatus(stopReason: string): SubagentStatus {
   }
 }
 
-/** One-line description of a turn end, used as the reported stop reason. */
-function turnReason(reason: TurnEndReason): string {
-  switch (reason.kind) {
-    case 'completed':
-    case 'aborted':
-    case 'blocked':
-    case 'max-tokens':
-    case 'interrupted':
-    case 'forked':
-      return reason.kind
-    case 'error':
-      return `${reason.error.code}: ${reason.error.message}`
-    default:
-      return 'unknown'
-  }
-}
-
 /** First non-empty line of a task prompt, bounded for the pet label. */
 function firstLine(text: string): string {
   const line = text.trim().split(/\r?\n/u).find(candidate => candidate.trim() !== '') ?? ''
@@ -159,25 +150,21 @@ function firstLine(text: string): string {
 }
 
 /**
- * The delegation worker. One instance owns every worker Agent, the live pet
- * snapshot, and the capped history store.
+ * The delegation worker owns live lead subagents, the Pet snapshot, and history.
  */
 export class PetWorker {
   private readonly ctx: Context
   private readonly options: PetWorkerOptions
   private readonly history: HistoryStore
-  private readonly handles = new Map<SessionId, AgentHandle>()
+  private readonly recurring: RecurringSchedules
   private readonly active = new Map<string, ActiveDelegation>()
-  private readonly activeBySession = new Map<SessionId, ActiveDelegation>()
   private readonly tracked = new Map<SessionId, TrackedSession>()
   private readonly queues = new Map<string, Promise<void>>()
-  private readonly turnWaiters = new Map<SessionId, {
-    readonly afterSeq: number
-    started: boolean
-    readonly resolve: (reason: TurnEndReason) => void
-  }>()
+  private readonly scheduled = new Map<string, ScheduledDelegateRecord>()
+  private scheduleTimer: ReturnType<typeof setTimeout> | undefined
+  private scheduleReady = false
   private readonly disposers: (() => void)[] = []
-  private closed = false
+  private readonly shutdown = new AbortController()
 
   /**
    * @param ctx - profiling context carrying agents, presets, sessions, and the subagent runtime.
@@ -186,7 +173,16 @@ export class PetWorker {
   constructor(ctx: Context, options: PetWorkerOptions) {
     this.ctx = ctx
     this.options = options
-    this.history = new HistoryStore({ root: options.historyRoot, limit: options.historyLimit })
+    this.history = new HistoryStore({
+      root: options.historyRoot,
+      limit: options.historyLimit,
+      logCleanupError: (error) => { this.logError(error) },
+    })
+    this.recurring = new RecurringSchedules({
+      root: options.historyRoot,
+      run: async (plan, occurrence) => { await this.runRecurring(plan, occurrence) },
+      logError: (error) => { this.logError(error) },
+    })
   }
 
   /** Retained record count. */
@@ -213,7 +209,13 @@ export class PetWorker {
    */
   async start(): Promise<void> {
     await mkdir(this.options.workspace, { recursive: true })
-    await this.history.open()
+    await this.recurring.open()
+    try {
+      for (const record of await this.history.open()) this.scheduled.set(record.id, record)
+    } catch (error) {
+      await this.recurring.close().catch((cleanup: unknown) => { this.logError(cleanup) })
+      throw error
+    }
     this.disposers.push(
       this.ctx.on('session/event', (session, event) => { this.onSessionEvent(session.id, event) }),
       this.ctx.on('subagent/start', (info) => { this.onSubagentStart(info) }),
@@ -221,21 +223,33 @@ export class PetWorker {
     )
   }
 
+  /** Allow recovered and newly scheduled delegations to start after profile readiness. */
+  resumeSchedule(): void {
+    this.scheduleReady = true
+    this.armSchedule()
+    this.recurring.start()
+  }
+
   /**
-   * Stop admitting work, cancel live worker turns, and release their handles.
-   * @returns after every owned agent and child tree is torn down.
+   * Stop admitting delegations and cancel and drain owned subagent trees.
+   * @returns after queued and active delegations settle.
    */
   async dispose(): Promise<void> {
-    this.closed = true
-    for (const dispose of this.disposers.splice(0)) dispose()
-    const handles = [...this.handles.values()]
-    this.handles.clear()
-    for (const handle of handles) handle.agent.cancel({ kind: 'disposed' })
-    await Promise.allSettled(handles.map(async (handle) => {
-      await handle.agent.whenIdle().catch(() => undefined)
-      await this.ctx.subagents.drainDescendants([handle.agent]).catch(() => undefined)
-      await handle.dispose()
-    }))
+    this.shutdown.abort()
+    clearTimeout(this.scheduleTimer)
+    this.scheduleTimer = undefined
+    this.scheduled.clear()
+    this.recurring.stop()
+    try {
+      await Promise.all(this.queues.values())
+      await this.history.whenIdle()
+    } finally {
+      try {
+        for (const dispose of this.disposers.splice(0)) dispose()
+      } finally {
+        await this.recurring.close()
+      }
+    }
   }
 
   /**
@@ -286,44 +300,112 @@ export class PetWorker {
     return this.ctx.llm.resolveModelInfo(provider, model, signal)
   }
 
-  private currentSubagentModel(agent: Agent, signal?: AbortSignal): Promise<LlmResolvedModelInfo> {
-    const route = agent.model.current()
-    if (route === undefined) throw new ToolContextUnavailableError('child model resolution requires a worker model route')
-    signal?.throwIfAborted()
-    return this.ctx.llm.resolveModelInfo(route.provider, route.model, signal)
-  }
-
   /**
    * Delegate one task. Calls for the same Agent conversation run in arrival
    * order; different conversations run concurrently.
    * @param input - the delegation fields.
-   * @param signal - caller cancellation; an aborted signal cancels the worker turn.
+   * @param signal - caller cancellation stops the active delegation tree.
    * @returns the terminal outcome returned to the caller.
    * @throws When the worker is shutting down or the input is empty.
    */
   async delegate(input: DelegateInput, signal?: AbortSignal): Promise<DelegateOutcome> {
-    if (this.closed) throw new Error('the pet worker is shutting down')
-    const agentSession = input.agentSession.trim()
-    if (agentSession === '') throw new Error('agentSession must be a non-empty Agent conversation name')
-    if (input.task.trim() === '') throw new Error('task must be non-empty')
+    this.shutdown.signal.throwIfAborted()
+    const record = this.newRecord(input, Date.now())
+    const cancellation = signal === undefined ? this.shutdown.signal : AbortSignal.any([signal, this.shutdown.signal])
+    return this.enqueue(record.agentSession, async () => {
+      await this.history.begin(record)
+      return this.run(record, cancellation)
+    })
+  }
+
+  /**
+   * Persist a one-time dispatch and arm its start independently of the MCP request.
+   * @param input - the delegation fields.
+   * @param timing - an absolute start time or delay from admission.
+   * @param signal - cancellation checked before admission.
+   * @returns the durable identity and scheduled start time.
+   * @throws If the start is invalid, the worker is closing, or history cannot be written.
+   */
+  async schedule(
+    input: DelegateInput,
+    timing: DelegateScheduleTiming,
+    signal?: AbortSignal,
+  ): Promise<{ readonly id: string; readonly scheduledAt: number }> {
+    this.shutdown.signal.throwIfAborted()
+    signal?.throwIfAborted()
     const now = Date.now()
+    const scheduledAt = 'runAt' in timing ? timing.runAt : now + timing.delaySeconds * 1_000
+    const year = new Date(scheduledAt).getUTCFullYear()
+    if (scheduledAt <= now || !Number.isFinite(year) || year > 9999) {
+      throw new ToolArgsError(['the scheduled start must be a valid future instant'])
+    }
+    const record: ScheduledDelegateRecord = { ...this.newRecord(input, now), status: 'scheduled', scheduledAt }
+    await this.history.begin(record)
+    if (!this.shutdown.signal.aborted) {
+      this.scheduled.set(record.id, record)
+      this.armSchedule()
+    }
+    return { id: record.id, scheduledAt }
+  }
+
+  /**
+   * Register a recurring dispatch with a fixed interval and captured workspace.
+   * @param input - validated assignment.
+   * @param timing - interval and optional end conditions.
+   * @param signal - cancellation before accepting the plan.
+   * @returns the saved recurring plan.
+   */
+  repeat(input: DelegateInput, timing: RecurringScheduleTiming, signal?: AbortSignal): Promise<RecurringPlan> {
+    this.shutdown.signal.throwIfAborted()
+    return this.recurring.create({ ...input, agentSession: input.agentSession.trim() }, this.options.workspace, timing, signal)
+  }
+
+  /**
+   * Read or manage future runs and retrieve the latest run when retained.
+   * @param id - recurring schedule ID.
+   * @param action - requested management operation.
+   * @param signal - cancellation before accepting the operation.
+   * @returns the plan and its latest run, with an indication of queued or active work.
+   */
+  async manageSchedule(id: PetScheduleId, action: PetScheduleAction, signal?: AbortSignal):
+  Promise<{ plan: RecurringPlan; lastRun?: DelegateDetail; inFlight: boolean }> {
+    const plan = await this.recurring.manage(id, action, signal)
+    const lastRun = plan.lastRunId === undefined ? undefined : await this.detail(plan.lastRunId)
+    return { plan, ...lastRun === undefined ? {} : { lastRun }, inFlight: this.recurring.inFlight(id) }
+  }
+
+  private async runRecurring(plan: RecurringPlan, occurrence: { id: string; scheduledAt: number }): Promise<void> {
+    const signal = this.shutdown.signal
     const record: DelegateRecord = {
+      ...this.newRecord(plan.input, Date.now(), occurrence.id, plan.workspace),
+      scheduledAt: occurrence.scheduledAt,
+      scheduleId: plan.id,
+    }
+    await this.enqueue(record.agentSession, async () => {
+      if (!signal.aborted) await this.run(record, signal)
+    })
+  }
+
+  private newRecord(input: DelegateInput, now: number, id = newDelegateId(now), workspace = this.options.workspace): DelegateRecord {
+    const agentSession = input.agentSession.trim()
+    if (agentSession === '') throw new ToolArgsError(['agentSession must be a non-empty Agent conversation name'])
+    if (input.task.trim() === '') throw new ToolArgsError(['task must be non-empty'])
+    return {
       ...input,
-      id: newDelegateId(now),
+      id,
       agentSession,
       dispatchedAt: now,
       status: 'queued',
-      mainSessionId: workerSessionId(agentSession),
-      workspace: this.options.workspace,
+      mainSessionId: leadSessionId(agentSession),
+      workspace,
       transcript: [],
       subagents: [],
     }
-    await this.history.begin(record)
+  }
+
+  private async enqueue<T>(agentSession: string, work: () => Promise<T>): Promise<T> {
     const previous = this.queues.get(agentSession) ?? Promise.resolve()
-    const run = previous.then(
-      async () => this.run(record, signal),
-      async () => this.run(record, signal),
-    )
+    const run = previous.then(work)
     const tail = run.then(() => undefined, () => undefined)
     this.queues.set(agentSession, tail)
     try {
@@ -333,109 +415,120 @@ export class PetWorker {
     }
   }
 
-  private async run(record: DelegateRecord, signal?: AbortSignal): Promise<DelegateOutcome> {
-    const delegation: ActiveDelegation = { record, builder: new TranscriptBuilder() }
-    record.status = 'running'
-    this.active.set(record.id, delegation)
-    await this.persist(delegation)
-    let modelInfo: LlmResolvedModelInfo | undefined
-    if (record.subagentModel !== undefined) {
-      const { provider, model } = record.subagentModel
-      try {
-        modelInfo = await this.advertisedSubagentModel(provider, model, signal)
-      } catch (error) {
-        const message = signal?.aborted === true && signal.reason === error ? undefined : `cannot resolve child model: ${String(error)}`
-        return this.finish(delegation, undefined, message)
-      }
-    }
-    let agent: Agent
-    try {
-      agent = await this.ensureAgent(record.agentSession)
-    } catch (error) {
-      return this.finish(delegation, undefined, `worker agent unavailable: ${String(error)}`)
-    }
-    let reasoningEffort: ReasoningEffortId | undefined
-    try {
-      const info = modelInfo ?? await this.currentSubagentModel(agent, signal)
-      signal?.throwIfAborted()
-      reasoningEffort = resolvePetReasoningEffort(info, record.reasoningEffort)
-    } catch (error) {
-      const message = signal?.aborted === true && signal.reason === error ? undefined : `cannot resolve child reasoning effort: ${String(error)}`
-      return this.finish(delegation, undefined, message)
-    }
-    this.activeBySession.set(agent.session.id, delegation)
-    this.tracked.set(agent.session.id, { delegation })
-    const afterSeq = agent.session.seq
-    let turnReasonValue: TurnEndReason | undefined
-    let waiterResolve!: (reason: TurnEndReason) => void
-    const turnEnded = new Promise<TurnEndReason>((resolve) => { waiterResolve = resolve })
-    this.turnWaiters.set(agent.session.id, { afterSeq, started: false, resolve: waiterResolve })
-    const abort = (): void => { agent.cancel({ kind: 'user' }) }
-    signal?.addEventListener('abort', abort, { once: true })
-    try {
-      const policy = reasoningEffort === undefined ? record : { ...record, reasoningEffort }
-      await this.ctx.subagents.withTreePolicy(agent, policy, async () => {
-        const envelope = this.envelope(record)
-        agent.followup(createUserMessage({ content: [{ type: 'text', text: envelope }], source: { kind: 'user' } }))
-        if (signal?.aborted === true) agent.cancel({ kind: 'user' })
-        const aborted = new Promise<undefined>((resolve) => {
-          if (signal === undefined) return
-          signal.addEventListener('abort', () => { resolve(undefined) }, { once: true })
-          if (signal.aborted) resolve(undefined)
-        })
-        turnReasonValue = signal === undefined ? await turnEnded : await Promise.race([turnEnded, aborted])
-        await this.settle(agent)
-      })
-    } catch (error) {
-      return await this.finish(delegation, undefined, String(error))
-    } finally {
-      signal?.removeEventListener('abort', abort)
-      this.turnWaiters.delete(agent.session.id)
-      this.activeBySession.delete(agent.session.id)
-      this.tracked.delete(agent.session.id)
-    }
-    return this.finish(delegation, turnReasonValue, undefined)
+  private armSchedule(): void {
+    clearTimeout(this.scheduleTimer)
+    this.scheduleTimer = undefined
+    if (!this.scheduleReady || this.shutdown.signal.aborted || this.scheduled.size === 0) return
+    let next = Number.POSITIVE_INFINITY
+    for (const record of this.scheduled.values()) next = Math.min(next, record.scheduledAt)
+    const delay = Math.max(0, Math.min(next - Date.now(), MAX_TIMER_DELAY_MS))
+    this.scheduleTimer = setTimeout(() => { this.dispatchDue() }, delay)
   }
 
-  private async settle(agent: Agent): Promise<void> {
-    for (;;) {
-      await agent.whenIdle()
-      const idleSeq = agent.session.seq
-      const more = await this.ctx.subagents.waitForTreeWork(agent)
-      if (!more && agent.status === 'idle' && agent.session.seq === idleSeq) break
+  private dispatchDue(): void {
+    const signal = this.shutdown.signal
+    if (signal.aborted) return
+    const now = Date.now()
+    const due = [...this.scheduled.values()].filter(record => record.scheduledAt <= now)
+      .sort((left, right) => left.scheduledAt - right.scheduledAt || left.dispatchedAt - right.dispatchedAt)
+    for (const record of due) {
+      this.scheduled.delete(record.id)
+      void this.enqueue(record.agentSession, async () => {
+        if (!signal.aborted) await this.run(record, signal)
+      }).catch((error: unknown) => { this.logError(error) })
     }
-    await this.ctx.sessions.flush(agent.session)
+    this.armSchedule()
+  }
+
+  private async run(record: DelegateRecord, signal: AbortSignal): Promise<DelegateOutcome> {
+    const delegation: ActiveDelegation = { record, builder: new TranscriptBuilder() }
+    record.status = 'running'
+    let result: SubagentResult | undefined
+    let errorMessage: string | undefined
+    try {
+      await this.history.save(record)
+      this.active.set(record.id, delegation)
+      signal.throwIfAborted()
+      const subagentModel = record.subagentModel ?? this.options.defaultSubagentModel
+      const { provider, model } = subagentModel
+      const info = record.subagentModel === undefined
+        ? await this.ctx.llm.resolveModelInfo(provider, model, signal)
+        : await this.advertisedSubagentModel(provider, model, signal)
+      const reasoningEffort = resolvePetReasoningEffort(info, record.reasoningEffort)
+      const handle = await this.openLead(record, signal)
+      const lead = handle.agent
+      this.tracked.set(lead.id, { delegation })
+      try {
+        const policy = { ...record, subagentModel, ...reasoningEffort === undefined ? {} : { reasoningEffort } }
+        result = await this.ctx.subagents.withTreePolicy(lead, policy, async () => {
+          try {
+            return await this.forward(lead, record, signal)
+          } finally {
+            await this.ctx.subagents.drainDescendants([lead])
+          }
+        })
+      } finally {
+        this.tracked.delete(lead.id)
+        await handle.dispose()
+      }
+    } catch (error) {
+      if (!signal.aborted || signal.reason !== error) errorMessage = error instanceof Error ? error.message : String(error)
+    }
+    return this.finish(record, result, errorMessage, signal.aborted)
+  }
+
+  private async forward(lead: Agent, record: DelegateRecord, signal: AbortSignal): Promise<SubagentResult> {
+    const envelope = this.envelope(record)
+    record.transcript.push({ kind: 'user', at: Date.now(), text: envelope })
+    const maxDepth = this.ctx.subagents.resolveMaxDepth(undefined, lead)
+    const child = await this.ctx.subagents.startActivation({
+      provider: 'spawn',
+      parent: lead,
+      agentPreset: this.options.childPresetId,
+      ...record.scheduledAt === undefined ? {} : { cwd: record.workspace },
+      label: firstLine(record.task),
+      prompt: [{ type: 'text', text: envelope }],
+      ...maxDepth === undefined ? {} : { maxDepth },
+      delivery: 'caller',
+      signal,
+    })
+    const cancellation = Promise.withResolvers<never>()
+    const abort = (): void => { cancellation.reject(signal.reason) }
+    signal.addEventListener('abort', abort, { once: true })
+    if (signal.aborted) abort()
+    try {
+      const result = await Promise.race([child.result, cancellation.promise])
+      await Promise.race([this.ctx.subagents.waitForTreeWork(lead), cancellation.promise])
+      await child.dispose()
+      return result
+    } finally {
+      signal.removeEventListener('abort', abort)
+    }
   }
 
   private async finish(
-    delegation: ActiveDelegation,
-    reason: TurnEndReason | undefined,
+    record: DelegateRecord,
+    result: SubagentResult | undefined,
     error: string | undefined,
+    cancelled: boolean,
   ): Promise<DelegateOutcome> {
-    const { record } = delegation
-    const stopReason = reason === undefined ? 'cancelled' : turnReason(reason)
-    const resultText = finalAssistantText(record.transcript)
-      || record.subagents.map(subagent => subagent.output ?? '').filter(text => text !== '').join('\n\n')
-    record.result = { text: resultText, stopReason }
+    const status = error !== undefined ? 'failed'
+      : cancelled || result?.stopReason === 'aborted' ? 'cancelled'
+        : result?.stopReason === 'completed' ? 'completed' : 'failed'
+    const stopReason = error !== undefined ? 'error' : status === 'cancelled' ? 'aborted' : result?.stopReason ?? 'error'
+    const output = result === undefined ? record.subagents[0]?.output ?? '' : textOf(result.output)
+    const diagnostic = error ?? result?.diagnostic
+    record.result = { text: output, stopReason }
     record.completedAt = Date.now()
-    record.status = error !== undefined || (reason !== undefined && reason.kind !== 'completed' && reason.kind !== 'aborted')
-      ? 'failed'
-      : reason?.kind === 'aborted' || reason === undefined ? 'cancelled' : 'completed'
-    if (error !== undefined) record.error = error
-    else if (reason !== undefined && reason.kind !== 'completed' && reason.kind !== 'aborted') {
-      record.error = turnReason(reason)
-    }
+    record.status = status
+    if (diagnostic !== undefined) record.error = diagnostic
     this.active.delete(record.id)
     for (const subagent of record.subagents) this.tracked.delete(brandString<SessionId>(subagent.sessionId))
-    await this.persist(delegation)
+    await this.history.save(record)
     return {
       id: record.id,
-      status: record.status,
-      acceptance: record.acceptance === undefined ? undefined : {
-        accepted: record.acceptance.accepted,
-        notes: record.acceptance.notes,
-      },
-      text: resultText,
+      status,
+      text: output,
       stopReason,
       ...record.error === undefined ? {} : { error: record.error },
     }
@@ -456,30 +549,30 @@ export class PetWorker {
       '',
       ...record.maxDepth === undefined ? [] : [`Maximum subagent depth: ${record.maxDepth} (direct children are depth 1).`],
       ...record.maxSubagents === undefined ? [] : [`Maximum subagents for this delegation: ${record.maxSubagents}, across all levels.`],
-      'Analyze the task, delegate it to one or more subagents with the `subagent` tool, wait for their results, compare them with the acceptance criteria, call `pet_acceptance` once, and reply with the expected return content.',
+      'Follow the stated scope and steps. If an input, clarification, or permission is needed, stop the affected work and report what the calling Agent must decide.',
     ].join('\n')
   }
 
-  private async ensureAgent(agentSession: string): Promise<Agent> {
-    const sessionId = workerSessionId(agentSession)
-    const live = this.ctx.agents.get(sessionId)
-    if (live !== undefined) return live
+  private async openLead(record: DelegateRecord, signal: AbortSignal): Promise<AgentHandle> {
+    const sessionId = brandString<SessionId>(record.mainSessionId)
     const existing = await this.ctx.sessionPersistence.stat(sessionId)
+    signal.throwIfAborted()
     const setup: AgentSetup = async (agentCtx, agent) => {
       installModelSelection(agentCtx)
+      agentCtx.on('agent/pre-step', async ({ agent: subject }, next) =>
+        subject === agent ? { kind: 'reject' } : next())
       const preset = this.ctx.agentPresets.presetForSession(agent.session) ?? this.options.presetId
       await this.ctx.agentPresets.mount(agentCtx, preset)
     }
-    const handle = existing === undefined
+    return existing === undefined
       ? await this.ctx.agents.create({
         sessionId,
-        meta: { cwd: this.options.workspace, agentPreset: this.options.presetId },
+        meta: { cwd: record.workspace, agentPreset: this.options.presetId },
         agentOptions: this.agentOptions(),
         setup,
+        signal,
       })
-      : await this.ctx.agents.resume({ resumeSessionId: sessionId, agentOptions: this.agentOptions(), setup })
-    this.handles.set(sessionId, handle)
-    return handle.agent
+      : await this.ctx.agents.resume({ resumeSessionId: sessionId, agentOptions: this.agentOptions(), setup, signal })
   }
 
   private agentOptions(): AgentOptions {
@@ -496,13 +589,6 @@ export class PetWorker {
     if (target !== undefined) {
       const entry = target.delegation.builder.push(event)
       if (entry !== undefined) this.append(target, entry)
-    }
-    const waiter = this.turnWaiters.get(sessionId)
-    if (waiter === undefined) return
-    if (event.type === 'turn/start' && event.seq > waiter.afterSeq) waiter.started = true
-    else if (event.type === 'turn/end' && waiter.started) {
-      waiter.started = false
-      waiter.resolve(event.data.reason)
     }
   }
 
@@ -565,20 +651,6 @@ export class PetWorker {
     } catch (error) {
       this.ctx.logger.error(error instanceof Error ? error : new Error(String(error)))
     }
-  }
-
-  /**
-   * Record an acceptance verdict from the worker main agent.
-   * @param agent - the Agent that called the acceptance tool.
-   * @param verdict - accepted flag and notes.
-   * @returns after the verdict is durable.
-   * @throws Error when the calling Agent is not the worker's active main agent.
-   */
-  async recordAcceptance(agent: Agent, verdict: AcceptanceVerdict): Promise<void> {
-    const delegation = this.activeBySession.get(agent.id)
-    if (delegation === undefined) throw new Error('pet_acceptance requires an active delegation from the worker main agent')
-    delegation.record.acceptance = { accepted: verdict.accepted, notes: verdict.notes, at: Date.now() }
-    await this.history.save(delegation.record)
   }
 
   /**

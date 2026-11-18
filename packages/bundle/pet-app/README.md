@@ -43,34 +43,46 @@ Add the token-bearing MCP URL from the startup output or pet settings to a local
 url = "http://127.0.0.1:3080/pet/mcp?token=<token>"
 startup_timeout_sec = 120
 tool_timeout_sec = 3600
-enabled_tools = ["list_subagent_models", "subagent_delegate"]
+enabled_tools = ["list_subagent_models", "read_subagent_guide", "subagent_delegate", "subagent_schedule", "subagent_schedule_manage"]
 ```
 
-Call `list_subagent_models` to get the provider and model IDs available for new subagents. Pass `provider` to filter the list. Pass both `provider` and `model` to get one entry with `reasoning.efforts` and the adapter's `reasoning.defaultEffort`, when declared. `reasoning: null` means the model has no selectable efforts. The result lists provider IDs whose catalogs could not be read in `unavailableProviders`. Include both tools in any existing Codex `enabled_tools` list.
+Call `list_subagent_models` to get the provider and model IDs available for new subagents. Pass `provider` to filter the list. Pass both `provider` and `model` to get one entry with `reasoning.efforts` and the adapter's `reasoning.defaultEffort`, when declared. `reasoning: null` means the model has no selectable efforts. The result lists provider IDs whose catalogs could not be read in `unavailableProviders`.
 
-Call `subagent_delegate` once per delegated task:
+Read the [Subagent creation and management guide](assets/subagent-management.md) at `dsh-pet://guides/subagent-management`, or call `read_subagent_guide` in a tool-only client. The guide covers read-only monitoring of a running task. Call `subagent_delegate` once per independent assignment.
 
 | Argument | Meaning |
 |---|---|
 | `agentSession` | Caller-supplied conversation name. Reuse it across calls within a conversation and choose a distinct name for each conversation. |
-| `task` | The complete task, with every fact the subagent needs. |
-| `acceptanceCriteria` | How the worker must judge success. |
-| `expectedReturn` | The content, format, and scope the worker should return. |
-| `subagentModel` | Optional `{ "provider": "…", "model": "…" }` from `list_subagent_models`. Applies to new subagents at every depth. The worker main Agent keeps its own model. Omission uses the normal DSH child model selection. |
+| `task` | The goal, scope, inputs, steps, and constraints for one execution subagent. |
+| `acceptanceCriteria` | The calling Agent’s independent checks, methods, and expected results. |
+| `expectedReturn` | The content, format, and scope of the execution subagent’s output. |
+| `subagentModel` | Optional `{ "provider": "…", "model": "…" }` from `list_subagent_models`. Applies to new subagents at every depth. Omission uses the Pet profile default, DeepSeek-V4.1-Flash (`deepseek-official` / `deepseek-flash`). |
 | `reasoningEffort` | Optional effort ID from the model details. Applies to new subagents at every depth. Omission uses `max` on models with selectable efforts and the provider's usual behavior on models with none. For a model with selectable efforts that lack `max`, supply one of its supported IDs. |
-| `maxDepth` | Optional positive safe integer. The worker is depth `0`, and its direct children are depth `1`. Omission uses the DSH depth setting. |
+| `maxDepth` | Optional positive safe integer. The lead subagent is depth `0`, and its direct execution subagent is depth `1`. Omission uses the DSH depth setting. |
 | `maxSubagents` | Optional positive safe integer. Limits cumulative new subagent creation at all depths for this call. Completed subagents still count. Omission leaves the cumulative count uncapped. |
 
-The call blocks until the worker and its subagent work settle. The runtime checks both limits before starting a subagent. Each call has its own budget. Resuming an existing subagent uses the live activation capacity. The result text includes the delegation ID, execution status, acceptance verdict, and returned content. A failed, cancelled, or rejected delegation sets `isError: true` and still includes the result text.
+The call waits for the execution subagent and its descendants to settle. The runtime checks both limits before creating a subagent, and each call has its own budget. The result includes the delegation ID, execution status, stop reason, and direct execution output. Failed and cancelled executions set `isError: true` and include any available output. The calling Agent verifies the result.
+
+### Schedule an assignment
+
+Call `subagent_schedule` with the same assignment fields and exactly one timing setting. For a one-time run, use `runAt` for a future RFC 3339 timestamp with an explicit UTC offset or `Z`, or `delaySeconds` for a positive whole number of seconds from submission. The tool returns the delegation ID and scheduled start without waiting for execution. Open the record in Pet history to see the planned start, status, and result.
+
+At the requested time, Pet adds the assignment to its Agent conversation’s execution queue. Pet restores pending one-time schedules on restart and queues overdue assignments once after the profile is ready. If Pet stops during execution, a restart reports interrupted work as failed in history.
+
+For recurring work, use `everySeconds` for a positive whole number of seconds between planned starts. For example, `300` starts the first run in five minutes and repeats every five minutes. Pet returns the schedule ID and next planned start after saving the plan. Each occurrence uses a fresh delegation and keeps its own result in Pet history. Filter history by the schedule ID to see retained runs.
+
+Set `durationSeconds` to end a plan a fixed number of seconds after submission, or set `maxRuns` to end it after a fixed number of dispatches. With both fields, the first condition reached ends the plan. Starts scheduled on the deadline are eligible. A pause still counts toward the duration. A skipped start counts toward neither the dispatch total nor `maxRuns`. Already-dispatched runs can finish. Management reports `ended`, the end reason, and the dispatch count.
+
+Call `subagent_schedule_manage` with the schedule ID and `view`, `pause`, `resume`, or `stop`. Viewing returns the plan and its latest retained result. Pause and stop apply to future starts, and accepted runs finish independently. Resume keeps the original interval alignment. After restart, recurring plans continue at the next future start. Pet skips and counts occurrences when the previous run is still queued or running, or when the scheduler has missed a full interval. Keep Pet running for on-time starts.
 
 ### What the pet shows
 
 - One icon per running subagent, placed around the pet. Each icon carries the subagent's color and label.
-- A click opens the delegation with the calling Agent’s conversation name, task, acceptance criteria, expected return, dispatch time, worker and subagent transcripts, acceptance verdict, and returned text.
-- A finished subagent disappears from the orbit. History groups records by Agent conversation and filters by conversation or task. It retains the newest `historyLimit` records (default 1000) and deletes the detail files of evicted records.
+- A click opens the delegation with the calling Agent’s conversation name, task, acceptance criteria, expected return, dispatch time, the lead subagent forwarding record, execution transcripts, and returned text.
+- A finished subagent disappears from the orbit. History groups records by Agent conversation and filters by conversation, task, or delegation ID.
 - The gear button shows the MCP URL and offers clipboard actions for the URL and the Codex TOML example.
 
-The page polls the worker every second. It is a normal HTML page served by the worker, so a browser shows the same content without the transparent window.
+The page polls the worker every second. The Result tab keeps its scroll position while the result is unchanged. The worker serves the same page to the transparent window and to regular browsers.
 
 <a id="configuration"></a>
 ## Configuration
@@ -80,9 +92,11 @@ Configure the `pet-worker` row in the profile's `cordis.patch.yml`. The bundle's
 | Field | Default | Meaning |
 |---|---|---|
 | `workspace` | `process.cwd()` | Absolute directory new worker sessions run in. Subagents inherit it. Start the worker from the project the Agent delegates work for. |
-| `historyRoot` | `$DSH_HOME/pet/history` | Absolute history directory; holds `index.json` and one file per retained record. |
-| `historyLimit` | `1000` | Maximum retained delegations. Running records are never evicted; their completed siblings are. |
-| `presetId` | `pet-worker` | Agent preset for the worker main Agent. |
+| `historyRoot` | `$DSH_HOME/pet/history` | Absolute directory for delegation history and recurring plans. One Pet worker may open this directory at a time. |
+| `historyLimit` | `1000` | Retention target for delegation records. Pet evicts settled records first and retains scheduled, queued, and running records. |
+| `presetId` | `pet-worker` | Agent preset for the lead subagent. |
+| `childPresetId` | `standard` | Agent preset for the direct execution subagent. |
+| `defaultSubagentModel` | `{ provider: deepseek-official, model: deepseek-flash }` | Route for every execution subagent when the caller omits `subagentModel`. |
 | `mcpPath` | `/pet/mcp` | Absolute MCP endpoint path. |
 | `pagePath` | `/pet` | Absolute pet page path; assets and the API live below it. |
 | `tokenFile` | `$DSH_HOME/pet/token` | Absolute file holding the access token. Deleting it issues a new token on the next start. |
@@ -97,11 +111,11 @@ The pet API and MCP endpoint authenticate the access token in the URL (`?token=`
 <details>
 <summary>Implementation internals — click to expand</summary>
 
-The [patch](cordis.patch.yml) inserts the `pet-worker` service row and one `@deepseek-ai/dsh-agent-preset` declaration. That preset contains a persona, a `tool-subagent` instance pinned to the `standard` coding preset, the `pet_acceptance` tool, and the standard compaction group. It contains no filesystem, shell, web, or user-question tools, so the worker main Agent cannot do the delegated work itself.
+The [patch](cordis.patch.yml) registers the `pet-worker` service and lead subagent preset. The service creates the direct execution subagent with the configured child preset and passes the task, acceptance criteria, and expected return as one input.
 
-The service resolves a deterministic worker Session ID from `agentSession` (`pet-<sha256 prefix>`). It resumes an existing Session or creates one when needed. Each delegation appends a user message with the task, waits for the matching `turn/end`, drains the subagent tree, and flushes the Session.
+The lead subagent reuses the deterministic Session ID derived from `agentSession` (`pet-<sha256 prefix>`). It owns the delegation tree. Pet starts the execution subagent through the runtime, awaits its result, and releases the live tree before returning.
 
-`subagent/start` and `subagent/end` associate children with the active delegation through their `parentSessionId`. `session/event` feeds a `TranscriptBuilder` that keeps user messages, assistant text and reasoning, tool results, and turn boundaries, and drops internal request, prompt, inbox, and model-selection events. The acceptance tool writes the worker's verdict onto the active record. At settlement the record and its transcripts are written atomically; the index and per-record files are pruned to the cap.
+`subagent/start` and `subagent/end` associate children with the active delegation through their `parentSessionId`. `session/event` feeds a `TranscriptBuilder` that keeps user messages, assistant text and reasoning, tool results, and turn boundaries, and drops internal request, prompt, inbox, and model-selection events. At settlement the record and its transcripts are written atomically; the index and per-record files are pruned to the cap.
 
 The MCP endpoint is one `createMcpHandler` handler mounted on the DSH web server through `@modelcontextprotocol/node`'s `toNodeHandler`. It serves the 2026-07-28 protocol and falls back to stateless 2025-era serving. The pet window is a separate Electron process launched with `assets/pet-window.mjs`; the page talks to it through a narrow preload bridge for window resizing and quitting.
 
@@ -122,15 +136,15 @@ The MCP endpoint is one `createMcpHandler` handler mounted on the DSH web server
 
 #### What the model sees
 
-The worker main model receives the `pet-worker` persona, the `subagent` and `pet_acceptance` tools, and the `Agent delegation` envelope as a user message. The persona requires subagent delegation, one acceptance call, and a final reply in the requested form. Each child uses the `standard` preset. The worker’s final reply appears in the pet and goes back to the calling Agent.
+The execution subagent receives the `subagent_delegate` task, criteria, and expected return in a user message. Its output appears in the pet and goes back to the calling Agent for verification.
 
 #### Token effect
 
-The MCP tool description and server instructions are stable for one installation; every delegation spends one worker model turn plus the subagent turns it spawns, and the worker's own prompt is constant apart from the delegate envelope and accumulated conversation, which compaction bounds.
+The calling Agent sees a short guide summary and can retrieve the full text on demand. Each delegation spends model tokens on the execution subtree. The lead subagent forwards by code.
 
 #### KV Cache effect
 
-The worker reuses one Session per Agent conversation, so providers can cache the system prompt and history across delegations. Compaction can rewrite the history and invalidate a cached prefix. Each subagent starts a fresh conversation with no shared prefix.
+Each execution subagent starts a fresh conversation. The lead subagent’s Session supplies lineage and stays outside execution model requests.
 
 ## Known Limitations and Deferred Work
 
@@ -139,7 +153,7 @@ The worker reuses one Session per Agent conversation, so providers can cache the
 - The worker opens a true desktop pet only when Electron is resolvable. Published installations without Electron use the browser page; set `electronPath` or install Electron beside the installation to restore the window.
 - Each pet worker serves one workspace. To delegate work in another project directory, start another worker or reconfigure `workspace`.
 - History stores normalized transcripts, not raw Session events. Internal request, prompt, inbox, and model-selection events are intentionally absent; the worker and child Sessions remain the authoritative raw logs.
-- The worker main Agent has no human channel. A task that needs a human decision fails or returns an explanation instead of asking.
+- The execution subagent uses the deployed DSH preset and its permissions. Pet has no per-dispatch permissions or temporary-workspace API.
 - The pet window is a second Electron process. Closing it does not stop the worker; the worker's process owns the MCP endpoint until `dsh` exits.
 - The access token is a local credential, not an account authorization. Anyone who can read the token file can call the worker; the server binds loopback only.
 - Windows transparency varies with GPU drivers; the viewer disables hardware acceleration for the window and falls back to the browser if Electron cannot start.
@@ -150,6 +164,6 @@ The worker reuses one Session per Agent conversation, so providers can cache the
 <details>
 <summary>Working context for maintainers — click to expand</summary>
 
-The `pet` template lives in `@deepseek-ai/dsh-official-bundles`; the CLI depends on this bundle so the installation carries the patch. The bundle owns its pet page assets under `assets/`, which the published package includes; the page is not a client plugin and is therefore outside the client UI i18n gate. The acceptance preset row is a separate tsdown entry (`lib/acceptance.js`) so the preset can mount it without starting the worker frontend.
+The `pet` template lives in `@deepseek-ai/dsh-official-bundles`. The CLI depends on this bundle so the installation carries the patch. The published package includes the pet page assets under `assets/`. The page’s dictionary supplies English and Chinese copy.
 
 </details>

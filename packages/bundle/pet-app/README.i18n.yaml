@@ -21,17 +21,20 @@
   en: 93e491dd5f35ee20
   zh: e64b54b5b8dc77af
 /deepseek-ai-dsh-pet-app/use-this-package/connect-an-agent:
-  en: 21cfd1223948a145
-  zh: fdf31edc3e0d798f
+  en: 28ca9f826bcacd2a
+  zh: a5b56574d1c38adc
+/deepseek-ai-dsh-pet-app/use-this-package/schedule-an-assignment:
+  en: 0a38879643562117
+  zh: d3fb877f49210833
 /deepseek-ai-dsh-pet-app/use-this-package/what-the-pet-shows:
-  en: e6aab67705600472
-  zh: 11e4fb1b68e5aba3
+  en: c95e68b258ccdce5
+  zh: 641eb9101fe0851f
 /deepseek-ai-dsh-pet-app/configuration:
-  en: 19abfe060860af61
-  zh: 6c4f20a5f3095b81
+  en: 6c2ccacc1fd1faaf
+  zh: d77c88677ddc05ec
 /deepseek-ai-dsh-pet-app/understand-the-implementation:
-  en: 7f7bf50c5b799fa1
-  zh: a2b5b7002294a905
+  en: 6db2b4dbbbf70d96
+  zh: b155cc04995a0d3e
 /deepseek-ai-dsh-pet-app/further-exploration:
   en: 5f451eb32b108f4e
   zh: 6611a13d3fda84e6
@@ -42,17 +45,17 @@
   en: b252ca511a13f0af
   zh: a7a83a57ea74a631
 /deepseek-ai-dsh-pet-app/model-experience/delegated-work/what-the-model-sees:
-  en: 34b33db76da206e1
-  zh: a1b96d1f6eec4543
+  en: 10fb925b3ed17b3d
+  zh: 9f10fc053229cc46
 /deepseek-ai-dsh-pet-app/model-experience/delegated-work/token-effect:
-  en: b642699332ec082f
-  zh: 70ecbae8e443c206
+  en: e03f6893297e6c19
+  zh: b4bb42ad5f78fff3
 /deepseek-ai-dsh-pet-app/model-experience/delegated-work/kv-cache-effect:
-  en: e36b54d5ba3565c5
-  zh: 0081e839e614afd6
+  en: b7bb98f55d9bb457
+  zh: be7351967d156423
 /deepseek-ai-dsh-pet-app/known-limitations-and-deferred-work:
-  en: ad45aca47ef2314c
-  zh: a95a6bbcabba496d
+  en: 76d1ddbc50edbfb9
+  zh: a0b79d827d8a3dd7
 /deepseek-ai-dsh-pet-app/known-limitations-and-deferred-work/dev-note:
-  en: f1ef63cc2370e2b4
-  zh: a0f92f8905386a46
+  en: 64166dc0e78ca48b
+  zh: b014289da7be788f

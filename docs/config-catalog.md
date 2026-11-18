@@ -2775,8 +2775,8 @@ export interface Config {
 
 ## `@deepseek-ai/dsh-pet-app`
 
-- `inject`: `webServer` · `agents` · `agentPresets` · `agentDefaultModel` · `llm` · `sessions` · `sessionPersistence` · `subagents`
-- `source`: [`packages/bundle/pet-app/src/index.ts:35`](../packages/bundle/pet-app/src/index.ts)
+- `inject`: `webServer` · `agents` · `agentPresets` · `agentDefaultModel` · `llm` · `sessionPersistence` · `subagents`
+- `source`: [`packages/bundle/pet-app/src/index.ts:34`](../packages/bundle/pet-app/src/index.ts)
 
 ```ts config-catalog
 /** Pet worker configuration, changeable from the profile patch. */
@@ -2787,8 +2787,17 @@ export interface Config {
   historyRoot: string
   /** Maximum retained delegations. @default 1000 */
   historyLimit: number
-  /** Agent preset mounted for the worker main agent. @default 'pet-worker' */
+  /** Preset for the lead subagent that owns the delegation tree. @default 'pet-worker' */
   presetId: string
+  /** Preset for the direct execution subagent. @default 'standard' */
+  childPresetId: string
+  /** Model route used when the caller omits `subagentModel`. */
+  defaultSubagentModel: {
+    /** Registered provider ID. @default 'deepseek-official' */
+    provider: string
+    /** Provider-owned model ID. @default 'deepseek-flash' */
+    model: string
+  }
   /** Absolute MCP endpoint path. @default '/pet/mcp' */
   mcpPath: string
   /** Absolute pet page path. @default '/pet' */

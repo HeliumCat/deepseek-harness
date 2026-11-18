@@ -41,7 +41,6 @@ describe('delegate history', () => {
     await store.open()
     const one = record('d-one', 1)
     one.status = 'completed'
-    one.acceptance = { accepted: true, notes: 'ok', at: 2 }
     const two = record('d-two', 2, 'agent two')
     two.status = 'failed'
     await store.begin(one)
@@ -52,7 +51,6 @@ describe('delegate history', () => {
     const groups = store.groups()
     expect(groups.map(group => group.agentSession)).toEqual(['agent two', 'agent one'])
     expect(groups[1]?.entries[0]?.taskPreview).toBe('task d-one')
-    expect(groups[1]?.entries[0]?.accepted).toBe(true)
     await expect(store.load('d-one')).resolves.toMatchObject({ agentSession: 'agent one', status: 'completed' })
   })
 
@@ -129,5 +127,32 @@ describe('delegate history', () => {
       status: 'failed',
       error: 'The pet worker stopped before this delegation completed.',
     })
+  })
+
+  it('restores scheduled work and leaves started work interrupted', async () => {
+    const directory = await root()
+    const first = new HistoryStore({ root: directory, limit: 1 })
+    const pending = { ...record('d-planned', 1), status: 'scheduled' as const, scheduledAt: 2_000 }
+    const started = { ...record('d-started', 2), status: 'scheduled' as const, scheduledAt: 1_000 }
+    await first.open()
+    await Promise.all([first.begin(pending), first.begin(started)])
+    // An interrupted write can leave the detail one transition ahead of the index.
+    await writeFile(join(directory, 'records', 'd-started.json'), JSON.stringify({ ...started, status: 'running' }))
+    const reopened = new HistoryStore({ root: directory, limit: 1 })
+    await expect(reopened.open()).resolves.toEqual([pending])
+    expect(reopened.entries()).toMatchObject([
+      { id: 'd-started', status: 'failed', scheduledAt: 1_000 },
+      { id: 'd-planned', status: 'scheduled', scheduledAt: 2_000 },
+    ])
+  })
+
+  it('retains the latest result alongside pending scheduled work', async () => {
+    const store = new HistoryStore({ root: await root(), limit: 1 })
+    await store.open()
+    await store.begin({ ...record('d-future', 2), status: 'scheduled', scheduledAt: 3_000 })
+    const finished = { ...record('d-finished', 1), status: 'completed' as const, scheduledAt: 1_000, completedAt: 1_001 }
+    await store.save(finished)
+    expect(store.entries().map(entry => entry.id)).toEqual(['d-future', 'd-finished'])
+    await expect(store.load(finished.id)).resolves.toMatchObject({ status: 'completed' })
   })
 })

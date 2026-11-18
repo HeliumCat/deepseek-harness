@@ -16,7 +16,7 @@ const STRINGS = {
   en: {
     history: 'History',
     bubbleIdle: 'Waiting for an Agent call',
-    bubbleAnalyzing: 'Analyzing a delegation…',
+    bubbleForwarding: 'Forwarding a delegation…',
     bubbleWorking: (n) => `${n} subagent${n === 1 ? '' : 's'} working`,
     bubbleOffline: 'Worker offline — retrying…',
     bubbleUnauthorized: 'Open the token-carrying pet URL printed by dsh',
@@ -25,20 +25,18 @@ const STRINGS = {
     result: 'Result',
     delegate: 'Agent delegation',
     dispatch: 'Dispatched',
-    acceptance: 'Acceptance',
+    scheduledStart: 'Scheduled start',
+    scheduleId: 'Schedule ID',
     subagents: 'Subagents',
-    mainRun: 'Worker run',
+    leadRun: 'Lead subagent',
     finalResult: 'Returned result',
     task: 'Task',
     criteria: 'Acceptance criteria',
     expected: 'Expected return',
-    noAcceptance: 'The worker has not recorded a verdict yet.',
-    accepted: 'Accepted',
-    rejected: 'Rejected',
-    notRecorded: 'Not recorded',
+    verifyResult: 'The calling Agent verifies the result.',
     historyTitle: 'Delegation history',
     historyMeta: (count, limit) => `${count} retained · cap ${limit}`,
-    filter: 'Filter by Agent conversation or task',
+    filter: 'Filter by conversation, task, or ID',
     noHistory: 'No delegations have been recorded yet.',
     emptyGroup: 'No records match this filter.',
     configTitle: 'Connect an Agent',
@@ -48,23 +46,24 @@ const STRINGS = {
     endpointCopied: 'MCP URL copied',
     copyCodex: 'Copy Codex config',
     codexCopied: 'Codex config copied',
-    caller: 'Agent',
+    caller: 'Calling Agent',
     waitFirst: 'Waiting for the first message…',
     waitingResult: 'The worker is still running. The result appears here when it settles.',
-    mainSession: 'Worker session',
+    waitingSchedule: 'The result will appear here after the scheduled run.',
+    leadSession: 'Lead subagent session',
     subagent: 'Subagent',
     reasoning: 'Reasoning',
     arguments: 'Arguments',
     showMore: 'Show more',
     showLess: 'Show less',
     copyFailed: 'Could not copy to the clipboard',
-    status: { queued: 'Queued', running: 'Running', completed: 'Completed', failed: 'Failed', cancelled: 'Cancelled' },
+    status: { scheduled: 'Scheduled', queued: 'Queued', running: 'Running', completed: 'Completed', failed: 'Failed', cancelled: 'Cancelled' },
     subStatus: { running: 'Running', completed: 'Completed', aborted: 'Aborted', error: 'Failed', 'max-tokens': 'Token limit', refusal: 'Refused', unknown: 'Unknown' },
   },
   zh: {
     history: '历史',
     bubbleIdle: '等待 Agent 调用',
-    bubbleAnalyzing: '正在分析 delegate…',
+    bubbleForwarding: '正在转发派发任务…',
     bubbleWorking: (n) => `${n} 个 subagent 正在工作`,
     bubbleOffline: 'worker 已离线，正在重试…',
     bubbleUnauthorized: '请打开 dsh 打印的带 token 的桌宠链接',
@@ -73,20 +72,18 @@ const STRINGS = {
     result: '返回结果',
     delegate: 'Agent 派发内容',
     dispatch: '派发时间',
-    acceptance: '验收情况',
+    scheduledStart: '计划开始时间',
+    scheduleId: '计划 ID',
     subagents: 'Subagents',
-    mainRun: '主 Agent 运行过程',
+    leadRun: 'Lead subagent',
     finalResult: '返回结果',
     task: '任务',
     criteria: '验收标准',
     expected: '期待返回',
-    noAcceptance: 'worker 还没有记录验收结论。',
-    accepted: '已通过',
-    rejected: '未通过',
-    notRecorded: '未记录',
+    verifyResult: '由调用方 Agent 独立验收。',
     historyTitle: '派发历史',
     historyMeta: (count, limit) => `保留 ${count} 条 · 上限 ${limit}`,
-    filter: '按 Agent 会话或任务过滤',
+    filter: '按会话、任务或派发 ID 过滤',
     noHistory: '还没有任何派发记录。',
     emptyGroup: '没有匹配的记录。',
     configTitle: '连接 Agent',
@@ -96,17 +93,18 @@ const STRINGS = {
     endpointCopied: '已复制 MCP URL',
     copyCodex: '复制 Codex 配置',
     codexCopied: '已复制 Codex 配置',
-    caller: 'Agent',
+    caller: '调用方 Agent',
     waitFirst: '等待第一条消息…',
     waitingResult: 'worker 仍在运行，结束后结果显示在这里。',
-    mainSession: '主 Agent session',
+    waitingSchedule: '定时任务执行结束后，结果会显示在这里。',
+    leadSession: 'Lead subagent 会话',
     subagent: 'Subagent',
     reasoning: '推理',
     arguments: '参数',
     showMore: '展开',
     showLess: '收起',
     copyFailed: '无法写入剪贴板',
-    status: { queued: '排队中', running: '运行中', completed: '已完成', failed: '失败', cancelled: '已取消' },
+    status: { scheduled: '已定时', queued: '排队中', running: '运行中', completed: '已完成', failed: '失败', cancelled: '已取消' },
     subStatus: { running: '运行中', completed: '已完成', aborted: '已中止', error: '失败', 'max-tokens': '超出 token 上限', refusal: '模型拒绝', unknown: '未知' },
   },
 }
@@ -320,7 +318,7 @@ function renderBubble(activeCount) {
     return
   }
   if (snapshot.active.length > 0) {
-    setBubble(t.bubbleAnalyzing)
+    setBubble(t.bubbleForwarding)
     return
   }
   setBubble(t.bubbleIdle)
@@ -341,11 +339,6 @@ async function loadSnapshot() {
     setAppState('offline')
     renderBubble(0)
   }
-}
-
-function acceptanceBadge(record) {
-  if (record.acceptance === undefined) return el('span', 'badge warn', t.notRecorded)
-  return el('span', `badge ${record.acceptance.accepted ? 'ok' : 'bad'}`, record.acceptance.accepted ? t.accepted : t.rejected)
 }
 
 function field(label, text) {
@@ -417,7 +410,7 @@ function renderEntry(entry, roleHint, key) {
   if (entry.kind === 'status') return el('div', 'entry status', entry.label)
   const wrap = el('div', `entry ${entry.kind}`)
   const head = el('div', 'entry-head')
-  const role = entry.kind === 'user' ? (roleHint === 'main' ? t.caller : 'User') : entry.kind === 'assistant' ? (roleHint === 'main' ? 'Worker' : 'Subagent') : 'Tool'
+  const role = entry.kind === 'user' ? (roleHint === 'lead' ? t.caller : 'User') : entry.kind === 'assistant' ? (roleHint === 'lead' ? t.leadRun : t.subagent) : 'Tool'
   head.append(el('span', 'entry-role', role))
   if (entry.kind === 'tool') head.append(el('span', '', entry.name || entry.callId))
   head.append(el('span', '', relativeTime(entry.at)))
@@ -464,16 +457,10 @@ function renderOverview(record) {
 
   const dispatch = section(t.dispatch)
   dispatch.append(field(t.dispatch, `${absoluteTime(record.dispatchedAt)} · ${relativeTime(record.dispatchedAt)}`))
-  dispatch.append(field(t.mainSession, record.mainSessionId))
+  if (record.scheduledAt !== undefined) dispatch.append(field(t.scheduledStart, absoluteTime(record.scheduledAt)))
+  if (record.scheduleId !== undefined) dispatch.append(field(t.scheduleId, record.scheduleId))
+  dispatch.append(field(t.leadSession, record.mainSessionId))
   fragment.append(dispatch)
-
-  const acceptance = section(t.acceptance)
-  const badgeRow = el('div', 'field')
-  badgeRow.append(acceptanceBadge(record))
-  if (record.acceptance !== undefined) badgeRow.append(el('div', 'field-text', record.acceptance.notes))
-  else badgeRow.append(el('div', 'field-text', t.noAcceptance))
-  acceptance.append(badgeRow)
-  fragment.append(acceptance)
 
   const subagents = section(t.subagents)
   if (record.subagents.length === 0) subagents.append(el('div', 'empty', t.waitFirst))
@@ -490,9 +477,9 @@ function renderOverview(record) {
 
 function renderRun(record) {
   const fragment = document.createDocumentFragment()
-  const main = section(t.mainRun)
-  main.append(renderTranscript(record.transcript, 'main', record.mainSessionId))
-  fragment.append(main)
+  const lead = section(t.leadRun)
+  lead.append(renderTranscript(record.transcript, 'lead', record.mainSessionId))
+  fragment.append(lead)
   for (const subagent of record.subagents) {
     const details = document.createElement('details')
     details.className = 'subagent-block'
@@ -516,26 +503,22 @@ function renderRun(record) {
 
 function renderResult(record) {
   const fragment = document.createDocumentFragment()
-  const acceptance = section(t.acceptance)
-  const row = el('div', 'field')
-  row.append(acceptanceBadge(record))
-  if (record.acceptance !== undefined) row.append(el('div', 'field-text', record.acceptance.notes))
-  else row.append(el('div', 'field-text', t.noAcceptance))
-  acceptance.append(row)
-  fragment.append(acceptance)
   const result = section(t.finalResult)
-  if (record.result === undefined) result.append(el('div', 'empty', t.waitingResult))
+  if (record.status === 'scheduled') result.append(el('div', 'empty', t.waitingSchedule))
+  else if (record.result === undefined && record.error === undefined) result.append(el('div', 'empty', t.waitingResult))
+  else if (record.result === undefined) result.append(el('div', 'field-text', record.error))
   else {
     const pre = el('pre', 'result-text', record.result.text || '(empty)')
     result.append(pre)
     result.append(el('div', 'field-label', `${record.status} · ${record.result.stopReason}`))
+    if (record.status === 'completed') result.append(el('div', 'field-text', t.verifyResult))
     if (record.error !== undefined) result.append(el('div', 'field-text', record.error))
   }
   fragment.append(result)
   return fragment
 }
 
-function renderPanel() {
+function renderPanel(previous) {
   const record = state.detail
   if (record === null) {
     return
@@ -545,6 +528,8 @@ function renderPanel() {
   dom.panelIcon.style.setProperty('--ring', focused === undefined ? '#6ea8ff' : focused.color)
   dom.panelName.textContent = focused === undefined ? record.agentSession : (focused.label || focused.name)
   dom.panelMeta.textContent = `${record.agentSession} · ${statusLabel(record.status)} · ${relativeTime(record.dispatchedAt)}`
+  if (state.tab === 'result' && previous?.status === record.status && previous.error === record.error
+    && previous.result?.text === record.result?.text && previous.result?.stopReason === record.result?.stopReason) return
   const scrollTop = dom.panelBody.scrollTop
   const active = document.activeElement
   const expansionKey = dom.panelBody.contains(active) ? active.dataset.expansionKey : undefined
@@ -574,8 +559,9 @@ async function loadDetail() {
   try {
     const detail = await getJson(`delegates/${encodeURIComponent(detailId)}`)
     if (detailId !== state.detailId) return
+    const previous = state.detail
     state.detail = detail
-    renderPanel()
+    renderPanel(previous)
   } catch (error) {
     if (errorMessage(error) === 'unauthorized') setBubble(t.bubbleUnauthorized)
   }
@@ -606,11 +592,6 @@ function closePanel() {
   showOnly('none')
 }
 
-function acceptanceBadgeFor(entry) {
-  if (entry.accepted === undefined) return el('span', 'badge warn', t.notRecorded)
-  return el('span', `badge ${entry.accepted ? 'ok' : 'bad'}`, entry.accepted ? t.accepted : t.rejected)
-}
-
 function renderHistory() {
   dom.historyBody.replaceChildren()
   if (state.history === null) {
@@ -622,6 +603,8 @@ function renderHistory() {
   for (const group of state.history.groups) {
     const entries = group.entries.filter(entry => filter === ''
       || group.agentSession.toLowerCase().includes(filter)
+      || entry.id.toLowerCase().includes(filter)
+      || entry.scheduleId?.toLowerCase().includes(filter)
       || entry.taskPreview.toLowerCase().includes(filter))
     if (entries.length === 0) continue
     shown += entries.length
@@ -634,10 +617,12 @@ function renderHistory() {
       row.type = 'button'
       const top = el('div', 'history-row-top')
       top.append(el('span', 'history-task', entry.taskPreview || '(empty task)'))
-      top.append(el('span', 'history-time', relativeTime(entry.dispatchedAt)))
+      const time = entry.status === 'scheduled' && entry.scheduledAt !== undefined
+        ? absoluteTime(entry.scheduledAt)
+        : relativeTime(entry.dispatchedAt)
+      top.append(el('span', 'history-time', time))
       const sub = el('div', 'history-sub')
       sub.append(el('span', `badge ${badgeClass(entry.status)}`, statusLabel(entry.status)))
-      sub.append(acceptanceBadgeFor(entry))
       sub.append(el('span', '', `${entry.subagentCount} subagent${entry.subagentCount === 1 ? '' : 's'}`))
       row.append(top, sub)
       row.addEventListener('click', () => { void openDelegate(entry.id) })
@@ -667,7 +652,7 @@ function codexSnippet(mcpUrl) {
     `url = ${JSON.stringify(mcpUrl)}`,
     'startup_timeout_sec = 120',
     'tool_timeout_sec = 3600',
-    'enabled_tools = ["list_subagent_models", "subagent_delegate"]',
+    'enabled_tools = ["list_subagent_models", "read_subagent_guide", "subagent_delegate", "subagent_schedule", "subagent_schedule_manage"]',
   ].join('\n')
 }
 

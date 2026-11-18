@@ -1,8 +1,8 @@
 /**
  * Capped delegation history. The index is one atomic JSON file; each record's
  * full transcript is a separate file so the retention cap can evict it without
- * rewriting the other records. The newest `limit` delegations are retained and
- * grouped by the caller-supplied Agent conversation name.
+ * rewriting the other records. Pending scheduled delegations are retained
+ * outside the history limit. Records are grouped by Agent conversation.
  *
  * @module @deepseek-ai/dsh-pet-app/history
  */
@@ -16,6 +16,7 @@ import type {
   DelegateStatus,
   HistoryEntry,
   HistoryGroup,
+  ScheduledDelegateRecord,
   SubagentRecord,
   TranscriptEntry,
 } from './types.ts'
@@ -28,8 +29,10 @@ const TASK_PREVIEW_LENGTH = 160
 export interface HistoryStoreOptions {
   /** Absolute directory holding the index and record files. */
   readonly root: string
-  /** Maximum retained delegations. */
+  /** History limit excluding pending scheduled delegations. */
   readonly limit: number
+  /** Report a failed deletion after the index has already evicted a record. */
+  readonly logCleanupError?: (error: unknown) => void
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -37,8 +40,20 @@ function isObject(value: unknown): value is Record<string, unknown> {
 }
 
 function isStatus(value: unknown): value is DelegateStatus {
-  return value === 'queued' || value === 'running' || value === 'completed'
+  return value === 'scheduled' || value === 'queued' || value === 'running' || value === 'completed'
     || value === 'failed' || value === 'cancelled'
+}
+
+function isPending(status: DelegateStatus): boolean {
+  return status === 'scheduled' || status === 'queued' || status === 'running'
+}
+
+function hasValidSchedule(value: Record<string, unknown>): boolean {
+  if (value.scheduleId !== undefined && typeof value.scheduleId !== 'string') return false
+  const time = value.scheduledAt
+  return time === undefined
+    ? value.status !== 'scheduled'
+    : typeof time === 'number' && Number.isSafeInteger(time) && Number.isFinite(new Date(time).getTime())
 }
 
 function isTranscriptEntry(value: unknown): value is TranscriptEntry {
@@ -78,7 +93,7 @@ function isRecord(value: unknown): value is DelegateRecord {
   if (typeof value.id !== 'string' || typeof value.agentSession !== 'string') return false
   if (typeof value.task !== 'string' || typeof value.acceptanceCriteria !== 'string') return false
   if (typeof value.expectedReturn !== 'string' || typeof value.dispatchedAt !== 'number') return false
-  if (!isStatus(value.status) || typeof value.mainSessionId !== 'string') return false
+  if (!isStatus(value.status) || !hasValidSchedule(value) || typeof value.mainSessionId !== 'string') return false
   if (typeof value.workspace !== 'string' || !Array.isArray(value.transcript)) return false
   if (value.transcript.length > 0 && !value.transcript.every(isTranscriptEntry)) return false
   if (!Array.isArray(value.subagents) || !value.subagents.every(isSubagent)) return false
@@ -122,15 +137,15 @@ export class HistoryStore {
   }
 
   /**
-   * Read the index and repair entries whose worker stopped mid-delegation.
-   * @returns after the index is usable.
+   * Read the index and reconcile pending entries with their persisted details.
+   * @returns Pending one-time delegations to restore.
    */
-  async open(): Promise<void> {
+  async open(): Promise<readonly ScheduledDelegateRecord[]> {
     let raw: string
     try {
       raw = await readFile(this.indexPath, 'utf8')
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []
       throw error
     }
     let parsed: unknown
@@ -140,51 +155,59 @@ export class HistoryStore {
       // A damaged index is moved aside rather than preventing the worker from serving new delegations.
       await writeFileAtomic(`${this.options.root}/index.corrupt-${Date.now().toString(36)}.json`, raw, { mode: 0o600, dirMode: 0o700 })
       await rm(this.indexPath, { force: true })
-      return
+      return []
     }
-    if (!Array.isArray(parsed)) return
+    if (!Array.isArray(parsed)) return []
     this.index = parsed.filter((entry): entry is HistoryEntry => isObject(entry)
       && typeof entry.id === 'string' && typeof entry.agentSession === 'string'
-      && typeof entry.dispatchedAt === 'number' && isStatus(entry.status)
+      && typeof entry.dispatchedAt === 'number' && isStatus(entry.status) && hasValidSchedule(entry)
       && typeof entry.taskPreview === 'string' && typeof entry.subagentCount === 'number')
-    await this.repairInterrupted()
+    return this.repairPending()
   }
 
-  private async repairInterrupted(): Promise<void> {
+  private async repairPending(): Promise<readonly ScheduledDelegateRecord[]> {
+    const scheduled: ScheduledDelegateRecord[] = []
     let changed = false
     const repaired: HistoryEntry[] = []
     for (const entry of this.index) {
-      if (entry.status !== 'running' && entry.status !== 'queued') {
+      if (!isPending(entry.status)) {
         repaired.push(entry)
         continue
       }
-      const completedAt = Date.now()
       const record = await this.load(entry.id)
+      if (entry.status === 'scheduled' && record?.status === 'scheduled' && record.scheduledAt !== undefined) {
+        scheduled.push({ ...record, scheduledAt: record.scheduledAt })
+        repaired.push(entry)
+        continue
+      }
+      changed = true
+      if (record !== undefined && !isPending(record.status)) {
+        repaired.push(this.entryOf(record))
+        continue
+      }
+      const completedAt = Date.now()
       if (record !== undefined) {
         record.status = 'failed'
         record.completedAt = completedAt
         record.error = 'The pet worker stopped before this delegation completed.'
-        await this.storeRecord(record)
+        await this.writeRecord(record.id, JSON.stringify(record, undefined, 2))
       }
       repaired.push({ ...entry, status: 'failed', completedAt })
-      changed = true
     }
     if (changed) {
+      await this.writeIndex(repaired)
       this.index = repaired
-      await this.writeIndex()
     }
+    return scheduled
   }
 
   /**
-   * Mint a record identity and append its index row before the worker runs.
-   * @param record - the new running record.
+   * Save the initial indexed record for a new delegation.
+   * @param record - the new delegation record.
    * @returns after the index and initial record file are durable.
    */
-  async begin(record: DelegateRecord): Promise<void> {
-    this.index.push(this.entryOf(record))
-    await this.storeRecord(record)
-    await this.writeIndex()
-    await this.prune()
+  begin(record: DelegateRecord): Promise<void> {
+    return this.save(record)
   }
 
   /**
@@ -194,12 +217,34 @@ export class HistoryStore {
    */
   async save(record: DelegateRecord): Promise<void> {
     const entry = this.entryOf(record)
-    const at = this.index.findIndex(candidate => candidate.id === record.id)
-    if (at === -1) this.index.push(entry)
-    else this.index[at] = entry
-    await this.storeRecord(record)
-    await this.writeIndex()
-    await this.prune()
+    const contents = JSON.stringify(record, undefined, 2)
+    await this.enqueue(async () => {
+      const next = [...this.index.filter(candidate => candidate.id !== entry.id), entry]
+      const capped = next.filter(candidate => candidate.scheduledAt === undefined || !isPending(candidate.status))
+      const evicted = new Set(next.filter(candidate => !isPending(candidate.status))
+        .sort((left, right) => (left.completedAt ?? left.dispatchedAt) - (right.completedAt ?? right.dispatchedAt))
+        .slice(0, Math.max(0, capped.length - this.options.limit))
+        .map(candidate => candidate.id))
+      const retained = next.filter(candidate => !evicted.has(candidate.id))
+      await this.writeRecord(entry.id, contents)
+      await this.writeIndex(retained)
+      this.index = retained
+      for (const id of evicted) {
+        try {
+          await rm(this.recordPath(id), { force: true })
+        } catch (error) {
+          this.options.logCleanupError?.(error)
+        }
+      }
+    })
+  }
+
+  /**
+   * Drain the history writes admitted before shutdown.
+   * @returns A promise that settles after the writes have finished.
+   */
+  whenIdle(): Promise<void> {
+    return this.writeChain
   }
 
   /**
@@ -258,46 +303,21 @@ export class HistoryStore {
       id: record.id,
       agentSession: record.agentSession,
       dispatchedAt: record.dispatchedAt,
+      ...record.scheduledAt === undefined ? {} : { scheduledAt: record.scheduledAt },
+      ...record.scheduleId === undefined ? {} : { scheduleId: record.scheduleId },
       ...record.completedAt === undefined ? {} : { completedAt: record.completedAt },
       status: record.status,
       taskPreview: taskPreview(record.task),
       subagentCount: record.subagents.length,
-      ...record.acceptance === undefined ? {} : { accepted: record.acceptance.accepted },
     }
   }
 
-  private async storeRecord(record: DelegateRecord): Promise<void> {
-    await this.enqueue(async () => {
-      await writeFileAtomic(this.recordPath(record.id), `${JSON.stringify(record, undefined, 2)}\n`, {
-        mode: 0o600,
-        dirMode: 0o700,
-      })
-    })
+  private async writeRecord(id: string, contents: string): Promise<void> {
+    await writeFileAtomic(this.recordPath(id), `${contents}\n`, { mode: 0o600, dirMode: 0o700 })
   }
 
-  private async writeIndex(): Promise<void> {
-    const snapshot = this.index
-    await this.enqueue(async () => {
-      await writeFileAtomic(this.indexPath, `${JSON.stringify(snapshot, undefined, 2)}\n`, {
-        mode: 0o600,
-        dirMode: 0o700,
-      })
-    })
-  }
-
-  private async prune(): Promise<void> {
-    const removed: string[] = []
-    while (this.index.length > this.options.limit) {
-      const oldest = [...this.index]
-        .filter(entry => entry.status !== 'running' && entry.status !== 'queued')
-        .sort((left, right) => left.dispatchedAt - right.dispatchedAt)[0]
-      if (oldest === undefined) break
-      this.index = this.index.filter(entry => entry.id !== oldest.id)
-      removed.push(oldest.id)
-    }
-    if (removed.length === 0) return
-    await this.writeIndex()
-    for (const id of removed) await rm(this.recordPath(id), { force: true })
+  private async writeIndex(entries: readonly HistoryEntry[]): Promise<void> {
+    await writeFileAtomic(this.indexPath, `${JSON.stringify(entries, undefined, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
   }
 
   private enqueue(operation: () => Promise<void>): Promise<void> {

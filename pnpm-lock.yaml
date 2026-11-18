@@ -2858,21 +2858,12 @@ importers:
       '@deepseek-ai/dsh-cmdline':
         specifier: workspace:*
         version: link:../../boot/cmdline
-      '@deepseek-ai/dsh-compaction-basic':
-        specifier: workspace:*
-        version: link:../../compaction/compaction-basic
-      '@deepseek-ai/dsh-compaction-tool-result-pruner':
-        specifier: workspace:*
-        version: link:../../compaction/compaction-tool-result-pruner
       '@deepseek-ai/dsh-home-paths':
         specifier: workspace:*
         version: link:../../util/home-paths
       '@deepseek-ai/dsh-llm':
         specifier: workspace:*
         version: link:../../llm/llm
-      '@deepseek-ai/dsh-persona':
-        specifier: workspace:*
-        version: link:../../preset/persona
       '@deepseek-ai/dsh-session':
         specifier: workspace:*
         version: link:../../core/session
@@ -2885,9 +2876,12 @@ importers:
       '@deepseek-ai/dsh-subagent':
         specifier: workspace:*
         version: link:../../subagent/subagent
-      '@deepseek-ai/dsh-tool-subagent':
+      '@deepseek-ai/dsh-timeout':
         specifier: workspace:*
-        version: link:../../subagent/tool-subagent
+        version: link:../../util/timeout
+      '@deepseek-ai/dsh-util-time':
+        specifier: workspace:*
+        version: link:../../util/time
       '@deepseek-ai/dsh-tools':
         specifier: workspace:*
         version: link:../../core/tools

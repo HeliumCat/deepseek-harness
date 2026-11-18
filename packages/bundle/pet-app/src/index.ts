@@ -26,7 +26,6 @@ export const inject = [
   'agentPresets',
   'agentDefaultModel',
   'llm',
-  'sessions',
   'sessionPersistence',
   'subagents',
 ]
@@ -39,8 +38,17 @@ export interface Config {
   historyRoot: string
   /** Maximum retained delegations. @default 1000 */
   historyLimit: number
-  /** Agent preset mounted for the worker main agent. @default 'pet-worker' */
+  /** Preset for the lead subagent that owns the delegation tree. @default 'pet-worker' */
   presetId: string
+  /** Preset for the direct execution subagent. @default 'standard' */
+  childPresetId: string
+  /** Model route used when the caller omits `subagentModel`. */
+  defaultSubagentModel: {
+    /** Registered provider ID. @default 'deepseek-official' */
+    provider: string
+    /** Provider-owned model ID. @default 'deepseek-flash' */
+    model: string
+  }
   /** Absolute MCP endpoint path. @default '/pet/mcp' */
   mcpPath: string
   /** Absolute pet page path. @default '/pet' */
@@ -59,6 +67,11 @@ export const Config: Schema<Config> = Schema.object({
   historyRoot: Schema.string().required(),
   historyLimit: Schema.natural().min(1).max(100_000).default(1000),
   presetId: Schema.string().min(1).default('pet-worker'),
+  childPresetId: Schema.string().min(1).default('standard'),
+  defaultSubagentModel: Schema.object({
+    provider: Schema.string().min(1).required(),
+    model: Schema.string().min(1).required(),
+  }).default({ provider: 'deepseek-official', model: 'deepseek-flash' }),
   mcpPath: Schema.string().min(1).default('/pet/mcp'),
   pagePath: Schema.string().min(1).default('/pet'),
   tokenFile: Schema.string().required(),
@@ -92,7 +105,7 @@ function codexSnippet(mcpUrl: string): string {
     `url = ${JSON.stringify(mcpUrl)}`,
     'startup_timeout_sec = 120',
     'tool_timeout_sec = 3600',
-    'enabled_tools = ["list_subagent_models", "subagent_delegate"]',
+    'enabled_tools = ["list_subagent_models", "read_subagent_guide", "subagent_delegate", "subagent_schedule", "subagent_schedule_manage"]',
   ].join('\n')
 }
 
@@ -115,15 +128,34 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     historyRoot,
     historyLimit: config.historyLimit,
     presetId: config.presetId,
+    childPresetId: config.childPresetId,
+    defaultSubagentModel: config.defaultSubagentModel,
     mcpUrl: urls.mcp,
     pageUrl: urls.page,
   })
   await worker.start()
-  ctx.provide('petWorker', worker)
-  const routes = mountPetRoutes(ctx, worker, { pagePath, token })
-  const mcp = mountPetMcp(ctx, worker, mcpPath, token)
+  const registrations: { routes?: ReturnType<typeof mountPetRoutes>; mcp?: ReturnType<typeof mountPetMcp> } = {}
   let viewer: PetWindowHandle | undefined
   let disposed = false
+
+  ctx.effect(() => async () => {
+    disposed = true
+    try {
+      await viewer?.close()
+    } finally {
+      registrations.routes?.()
+      registrations.mcp?.route()
+      try {
+        await worker.dispose()
+      } finally {
+        await registrations.mcp?.close()
+      }
+    }
+  }, 'pet-app: lifetime')
+
+  ctx.provide('petWorker', worker)
+  registrations.routes = mountPetRoutes(ctx, worker, { pagePath, token })
+  registrations.mcp = mountPetMcp(ctx, worker, mcpPath, token)
 
   console.log(`dsh pet: pet page ${urls.page}`)
   console.log(`dsh pet: MCP endpoint ${urls.mcp}`)
@@ -132,6 +164,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
 
   const launch = (): void => {
     if (disposed) return
+    worker.resumeSchedule()
     void openPetWindow({
       pageUrl: urls.page,
       mode: config.windowMode,
@@ -145,13 +178,4 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   const ready = ctx.get('appReady')
   if (ready === undefined) launch()
   else ctx.effect(() => ready.onReady(launch), 'pet-app: launch pet window on readiness')
-
-  ctx.effect(() => async () => {
-    disposed = true
-    await viewer?.close()
-    routes()
-    mcp.route()
-    await mcp.close()
-    await worker.dispose()
-  }, 'pet-app: lifetime')
 }

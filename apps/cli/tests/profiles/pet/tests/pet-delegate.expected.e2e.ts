@@ -1,7 +1,6 @@
 /**
- * The pet profile end to end through the built CLI: `subagent_delegate`
- * MCP call drives the worker main agent through one subagent delegation and one
- * acceptance verdict, and the pet history APIs expose the settled record.
+ * The built pet profile exposes the caller guide and forwards each assignment
+ * to one execution subagent, with runtime tree limits and durable history.
  */
 
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
@@ -18,35 +17,51 @@ const mockUrl = new URL('./fixtures/pet-mock-llm.mjs', import.meta.url).href
 
 /** One JSON-RPC response frame, narrowed to the fields this spec reads. */
 interface JsonRpcFrame {
+  error?: { code: number; message: string }
   result?: {
     serverInfo?: { name?: string }
     instructions?: string
-    tools?: { name: string; inputSchema: object }[]
+    tools?: { name: string; inputSchema: object; description: string }[]
+    resources?: { uri: string; mimeType: string }[]
+    contents?: { uri: string; text: string }[]
     isError?: boolean
     content?: { type?: string; text?: string }[]
-    structuredContent?: { models: { provider: string; model: string; name: string }[]; unavailableProviders: string[] }
+    structuredContent?: {
+      models?: { provider: string; model: string; name: string }[]
+      unavailableProviders?: string[]
+      id?: string
+      status?: string
+      scheduledAt?: string
+      scheduleId?: string
+      nextRunAt?: string
+      endsAt?: string
+      runCount?: number
+      endReason?: string
+      lastRun?: { id: string; status: string; result?: { text: string } }
+    }
   }
 }
 
 /** The pet snapshot API body, narrowed to the fields this spec reads. */
 interface SnapshotBody {
   historyCount: number
-  active: { subagents: unknown[] }[]
+  active: { agentSession: string; subagents: unknown[] }[]
 }
 
 /** The pet history API body, narrowed to the fields this spec reads. */
 interface HistoryBody {
   limit: number
-  groups: { agentSession: string; entries: { id: string; accepted: boolean }[] }[]
+  groups: { agentSession: string; entries: { id: string; status: string; subagentCount: number }[] }[]
 }
 
 /** One delegation record, narrowed to the fields this spec reads. */
 interface RecordBody {
   agentSession: string
+  mainSessionId: string
   status: string
+  scheduledAt?: number
   transcript: { text?: string }[]
-  subagents: { sessionId: string; parentSessionId: string; output?: string; transcript: { text?: string }[] }[]
-  acceptance?: { accepted: boolean }
+  subagents: { sessionId: string; parentSessionId: string; startedAt: number; output?: string; transcript: { text?: string }[] }[]
 }
 
 /** Temp patch overriding the pet worker to a keyless, viewerless local run. */
@@ -61,6 +76,9 @@ function fixture() {
     '  config:',
     '    provider: cli-mock',
     '    model: cli-mock',
+    '',
+    '- id: llm-deepseek',
+    '  disabled: true',
     '',
     '- insert:',
     '    - id: pet-mock-llm',
@@ -88,11 +106,15 @@ function extractBody(text: string, contentType: string): string {
     .map(line => line.slice(5).trim()).filter(line => line !== '').join('\n')
 }
 
-/** POST one legacy Streamable HTTP MCP message. */
-async function post(mcp: string, message: unknown, label: string): Promise<{ status: number; json?: JsonRpcFrame }> {
+/** POST once without retry. A modern request includes transport routing headers. */
+async function post(mcp: string, message: unknown, label: string, modernMethod?: string): Promise<{ status: number; json?: JsonRpcFrame }> {
   const response = await request(label, mcp, 120_000, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+    headers: {
+      'content-type': 'application/json',
+      accept: 'application/json, text/event-stream',
+      ...modernMethod === undefined ? {} : { 'MCP-Protocol-Version': '2026-07-28', 'Mcp-Method': modernMethod },
+    },
     body: JSON.stringify(message),
   }, 1)
   const body = extractBody(await response.text(), response.headers.get('content-type') ?? '')
@@ -127,8 +149,7 @@ async function request(
   throw new Error(`fetch ${label} failed after ${Date.now() - started} ms: ${target}`, { cause: last })
 }
 
-it.skipIf(!built)('reports accepted and rejected Agent delegations and retains their grouped history', async () => {
-  const f = fixture()
+async function startPet(f: ReturnType<typeof fixture>) {
   const child = execa(process.execPath, [bin, '--profile', 'pet', '--patch', f.patch, '--no-open', '--port', '0'], {
     cwd: f.root,
     env: {
@@ -149,6 +170,15 @@ it.skipIf(!built)('reports accepted and rejected Agent delegations and retains t
   child.stderr?.setEncoding('utf8').on('data', (text: string) => { stderr += text })
   let exited = false
   void child.then(() => { exited = true })
+  const stop = async (): Promise<void> => {
+    const timer = setTimeout(() => child.kill('SIGKILL'), 10_000)
+    child.kill('SIGTERM')
+    try {
+      await child
+    } finally {
+      clearTimeout(timer)
+    }
+  }
   try {
     await expect.poll(() => {
       if (exited) throw new Error(`pet process exited early\n${stdout}\n${stderr}`)
@@ -164,6 +194,20 @@ it.skipIf(!built)('reports accepted and rejected Agent delegations and retains t
     const mcp = new URL('/pet/mcp', url)
     mcp.search = url.search
     const api = (path: string): URL => new URL(`${path}?token=${token}`, url)
+
+    return { pageUrl, url, mcp, api, stop, output: () => ({ stdout, stderr }) }
+  } catch (error) {
+    await stop()
+    throw error
+  }
+}
+
+it.skipIf(!built)('serves the guide and forwards Agent assignments into the shared lead subagent history', async () => {
+  const f = fixture()
+  let pet: Awaited<ReturnType<typeof startPet>> | undefined
+  try {
+    pet = await startPet(f)
+    const { pageUrl, url, mcp, api } = pet
 
     const page = await request('pet page', pageUrl, 15_000)
     expect(page.status).toBe(200)
@@ -189,20 +233,54 @@ it.skipIf(!built)('reports accepted and rejected Agent delegations and retains t
     }, 'initialize')
     expect(init.status).toBe(200)
     expect(init.json?.result?.serverInfo?.name).toBe('dsh_pet')
-    expect(init.json?.result?.instructions).toContain('Use `subagent_delegate` for substantial work you can hand off with clear acceptance criteria.')
+    expect(init.json?.result?.instructions).toContain('The calling Agent plans, authorizes, and independently verifies the result.')
+    expect(init.json?.result?.instructions).toContain('When asked to monitor a run, prefer delegating read-only checks')
+    expect(init.json?.result?.instructions).toContain('use subagent_schedule with everySeconds')
     const initialized = await post(mcp.href, { jsonrpc: '2.0', method: 'notifications/initialized' }, 'initialized')
     expect(initialized.status).toBe(202)
 
     const list = await post(mcp.href, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }, 'tools/list')
     expect(list.status).toBe(200)
-    expect(list.json?.result?.tools?.map(tool => tool.name)).toEqual(['list_subagent_models', 'subagent_delegate'])
-    const delegationSchema = list.json?.result?.tools?.[1]?.inputSchema
+    expect(list.json?.result?.tools?.map(tool => tool.name)).toEqual([
+      'list_subagent_models', 'read_subagent_guide', 'subagent_delegate', 'subagent_schedule', 'subagent_schedule_manage',
+    ])
+    const delegationTool = list.json?.result?.tools?.find(tool => tool.name === 'subagent_delegate')
+    const delegationSchema = delegationTool?.inputSchema
     expect(delegationSchema).toMatchObject({
       properties: { agentSession: { type: 'string' } },
       required: ['agentSession', 'task', 'acceptanceCriteria', 'expectedReturn'],
     })
     expect(delegationSchema).not.toHaveProperty('properties.codexSession')
-    expect(stdout).toContain('enabled_tools = ["list_subagent_models", "subagent_delegate"]')
+    expect(delegationSchema).toHaveProperty('properties.acceptanceCriteria.description',
+      'Specify each check, its method, and the expected result. For deliverables that support unit testing, '
+      + 'specify the unit tests the calling Agent will write and run.')
+    expect(pet.output().stdout).toContain('"subagent_delegate", "subagent_schedule", "subagent_schedule_manage"')
+
+    const guideUri = 'dsh-pet://guides/subagent-management'
+    expect(delegationTool?.description).toContain(guideUri)
+    const resources = await post(mcp.href, { jsonrpc: '2.0', id: 20, method: 'resources/list', params: {} }, 'resources/list')
+    expect(resources.json?.result?.resources).toMatchObject([{ uri: guideUri, mimeType: 'text/markdown' }])
+    const resource = await post(mcp.href, { jsonrpc: '2.0', id: 21, method: 'resources/read', params: { uri: guideUri } }, 'resources/read')
+    const guide = resource.json?.result?.contents?.[0]?.text
+    expect(guide).toContain('# Subagent 创建与管理规范')
+    expect(guide).toContain('检查间隔、最长等待时间，以及完成、失败、超时的判据')
+    expect(guide).toContain('调用方不得并行执行已经委派的同一项工作')
+    expect(guide).toContain('由调用方编写并运行约定的单元测试')
+    expect(guide).toContain('验收时不得重做已经委派的同一项工作')
+    expect(guide).toContain('## 10. 执行顺序')
+    const missing = await post(mcp.href, { jsonrpc: '2.0', id: 22, method: 'resources/read', params: { uri: guideUri + '/unknown' } }, 'unknown resource')
+    expect(missing.json?.error?.code).toBe(-32602)
+    expect(missing.json?.error?.message).toContain('Resource not found')
+    const discovered = await post(mcp.href, {
+      jsonrpc: '2.0', id: 26, method: 'server/discover', params: {
+        _meta: {
+          'io.modelcontextprotocol/protocolVersion': '2026-07-28',
+          'io.modelcontextprotocol/clientCapabilities': {},
+        },
+      },
+    }, 'server/discover', 'server/discover')
+    expect(discovered.status, discovered.json?.error?.message).toBe(200)
+    expect(discovered.json?.result?.instructions).toBe(init.json?.result?.instructions)
 
     const invoke = async (id: number, name: string, args: Record<string, unknown>): Promise<JsonRpcFrame['result']> => {
       const response = await post(mcp.href, {
@@ -211,6 +289,7 @@ it.skipIf(!built)('reports accepted and rejected Agent delegations and retains t
       expect(response.status).toBe(200)
       return response.json?.result
     }
+    expect((await invoke(23, 'read_subagent_guide', {}))?.content?.[0]?.text).toBe(guide)
     const catalog = await invoke(5, 'list_subagent_models', { provider: 'pet-child-mock' })
     const childModel = { provider: 'pet-child-mock', model: 'pet-selected' }
     expect(catalog?.structuredContent?.models).toContainEqual({ ...childModel, name: 'Pet test model' })
@@ -249,19 +328,25 @@ it.skipIf(!built)('reports accepted and rejected Agent delegations and retains t
     expect(legacy?.isError).toBe(true)
     expect(legacy?.content?.[0]?.text).toContain('requires non-empty agentSession')
 
-    const delegations = [
-      { agentSession: 'pet-e2e-accepted', expectedChildOutput: 'PET_CHILD_OK', accepted: true },
-      { agentSession: 'pet-e2e-rejected', expectedChildOutput: 'PET_CHILD_OTHER', accepted: false },
-    ]
-    for (const [index, { agentSession, expectedChildOutput, accepted }] of delegations.entries()) {
+    const unsupportedPermissions = await invoke(25, 'subagent_delegate', {
+      ...argumentsFor('invalid-permissions', 'Use an isolated workspace'), permissions: { writablePaths: [] },
+    })
+    expect(unsupportedPermissions?.isError).toBe(true)
+    expect(unsupportedPermissions?.content?.[0]?.text).toContain('Unsupported delegation arguments: permissions')
+
+    const agentSession = 'pet-e2e-forward'
+    const task = 'Return the child marker.\nPreserve  two spaces.'
+    const criteria = ['The child output text is exactly PET_CHILD_OK.', 'The child output text is exactly PET_CHILD_OTHER.']
+    const records: RecordBody[] = []
+    for (const [index, acceptanceCriteria] of criteria.entries()) {
       const call = await post(mcp.href, {
         jsonrpc: '2.0', id: index + 3, method: 'tools/call',
         params: {
           name: 'subagent_delegate',
           arguments: {
             agentSession,
-            task: 'Run a subagent and return its output.',
-            acceptanceCriteria: `The child output text is exactly ${expectedChildOutput}.`,
+            task,
+            acceptanceCriteria,
             expectedReturn: 'Return the child output text.',
           },
         },
@@ -269,50 +354,43 @@ it.skipIf(!built)('reports accepted and rejected Agent delegations and retains t
       expect(call.status).toBe(200)
       const outcome = call.json?.result?.content?.[0]?.text ?? ''
       expect(outcome).toContain('Status: completed')
-      expect(outcome).toContain(`Acceptance: ${accepted ? 'accepted' : 'rejected'}`)
-      expect(outcome).toContain('PET_CHILD_OK')
-      expect(outcome).toContain('PET_RESULT_OK')
-      if (!accepted) expect(outcome).toContain('Acceptance notes: The criterion expected PET_CHILD_OTHER. The child returned PET_CHILD_OK.')
-      expect(call.json?.result?.isError ?? false, agentSession).toBe(!accepted)
+      expect(outcome).toContain('Verification: required by the calling Agent')
+      expect(outcome.split('\n\n').at(-1)).toBe('PET_CHILD_OK')
+      expect(call.json?.result?.isError ?? false, agentSession).toBe(false)
+      const record = await recordFor(call.json?.result, acceptanceCriteria)
+      records.push(record)
+      expect(record.status).toBe('completed')
+      expect(record.agentSession).toBe(agentSession)
+      expect(record).not.toHaveProperty('acceptance')
+      expect(record.transcript[0]?.text).toMatch(/^Agent delegation \S+ from conversation /u)
+      expect(record.subagents).toHaveLength(1)
+      expect(record.subagents[0]?.parentSessionId).toBe(record.mainSessionId)
+      expect(record.subagents[0]?.output).toBe('PET_CHILD_OK')
+      const assignment = record.subagents[0]?.transcript.find(entry => entry.text?.startsWith('Agent delegation '))
+      expect(assignment?.text).toContain(task)
+      expect(assignment?.text).toContain(acceptanceCriteria)
     }
+    expect(records[0]?.mainSessionId).toBe(records[1]?.mainSessionId)
+    expect(records[0]?.subagents[0]?.sessionId).not.toBe(records[1]?.subagents[0]?.sessionId)
 
     const snapshot = await request('snapshot', api('/pet/api/snapshot'), 15_000)
     expect(snapshot.status).toBe(200)
     const snapshotBody = JSON.parse(await snapshot.text()) as SnapshotBody
     expect(snapshotBody.active.flatMap(item => item.subagents)).toHaveLength(0)
-    expect(snapshotBody.historyCount).toBe(delegations.length)
+    expect(snapshotBody.historyCount).toBe(criteria.length)
 
     const history = await request('history', api('/pet/api/history'), 15_000)
     expect(history.status).toBe(200)
     const historyBody = JSON.parse(await history.text()) as HistoryBody
     expect(historyBody.limit).toBe(4)
-    expect(historyBody.groups).toHaveLength(delegations.length)
-    for (const { agentSession, accepted } of delegations) {
-      const group = historyBody.groups.find(candidate => candidate.agentSession === agentSession)
-      expect(group?.entries).toHaveLength(1)
-      const entry = group?.entries[0]
-      if (entry === undefined) throw new Error(`history has no entry for ${agentSession}`)
-      expect(entry.accepted).toBe(accepted)
-
-      const detail = await request('delegate detail', api(`/pet/api/delegates/${encodeURIComponent(entry.id)}`), 15_000)
-      expect(detail.status).toBe(200)
-      const record = JSON.parse(await detail.text()) as RecordBody
-      expect(record.status).toBe('completed')
-      expect(record.agentSession).toBe(agentSession)
-      expect(record).not.toHaveProperty('codexSession')
-      expect(record.transcript[0]?.text).toMatch(/^Agent delegation \S+ from conversation /u)
-      expect(record.subagents).toHaveLength(1)
-      const [subagent] = record.subagents
-      if (subagent === undefined) throw new Error('record has no subagent')
-      expect(subagent.output).toBe('PET_CHILD_OK')
-      expect(subagent.transcript.length).toBeGreaterThan(0)
-      expect(record.acceptance?.accepted).toBe(accepted)
-    }
+    expect(historyBody.groups).toHaveLength(1)
+    expect(historyBody.groups[0]?.agentSession).toBe(agentSession)
+    expect(historyBody.groups[0]?.entries.map(entry => entry.subagentCount)).toEqual([1, 1])
 
     const constrained = [
       { session: 'pet-depth-limited', task: 'PET_TRY_NESTED', maxDepth: 1, maxSubagents: 3, created: 1 },
       { session: 'pet-depth-two', task: 'PET_TRY_NESTED', maxDepth: 2, maxSubagents: 2, created: 2, reasoningEffort: 'high' },
-      { session: 'pet-count-limited', task: 'PET_TRY_NESTED PET_TRY_SIBLINGS', maxDepth: 2, maxSubagents: 1, created: 1 },
+      { session: 'pet-count-limited', task: 'PET_TRY_NESTED', maxDepth: 2, maxSubagents: 1, created: 1 },
     ]
     for (const [index, { session, task, maxDepth, maxSubagents, created, reasoningEffort }] of constrained.entries()) {
       const result = await invoke(10 + index, 'subagent_delegate', {
@@ -333,7 +411,6 @@ it.skipIf(!built)('reports accepted and rejected Agent delegations and retains t
       } else if (session === 'pet-depth-two') {
         expect(grandchild?.parentSessionId).toBe(child.sessionId)
       } else {
-        expect(record.transcript.map(entry => entry.text).join('\n')).toContain('subagent creation limit (1) reached')
         expect(child.transcript.map(entry => entry.text).join('\n')).toContain('subagent creation limit (1) reached')
       }
     }
@@ -361,13 +438,189 @@ it.skipIf(!built)('reports accepted and rejected Agent delegations and retains t
     expect(noEffort?.isError ?? false).toBe(false)
     expect((await recordFor(noEffort, 'model without efforts')).subagents.map(child => child.output))
       .toEqual(['pet-child-mock/pet-no-effort none PET_SELECTED'])
+    const executionFailure = await invoke(24, 'subagent_delegate', argumentsFor('pet-execution-failure', 'PET_FORCE_FAILURE'))
+    expect(executionFailure?.isError).toBe(true)
+    expect(executionFailure?.content?.[0]?.text).toContain('Status: failed')
+    expect((await recordFor(executionFailure, 'execution failure')).subagents).toHaveLength(1)
+
+    const cancelledSession = 'pet-cancel-after-start'
+    const controller = new AbortController()
+    const pending = fetch(mcp, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+      body: JSON.stringify({
+        jsonrpc: '2.0', id: 27, method: 'tools/call',
+        params: { name: 'subagent_delegate', arguments: argumentsFor(cancelledSession, 'PET_WAIT_FOR_CANCEL') },
+      }),
+      signal: controller.signal,
+    }).then(() => false, () => true)
+    try {
+      await expect.poll(async () => {
+        const response = await request('active execution', api('/pet/api/snapshot'), 3_000, {}, 1)
+        const state = await response.json() as SnapshotBody
+        return state.active.find(item => item.agentSession === cancelledSession)?.subagents.length
+      }, { timeout: 8_000 }).toBe(1)
+    } finally {
+      controller.abort()
+    }
+    expect(await pending).toBe(true)
+    await expect.poll(async () => {
+      const response = await request('cancelled execution', api('/pet/api/history'), 3_000, {}, 1)
+      const state = await response.json() as HistoryBody
+      return state.groups.find(item => item.agentSession === cancelledSession)?.entries[0]?.status
+    }, { timeout: 8_000 }).toBe('cancelled')
+    const afterCancel = await invoke(28, 'subagent_delegate', argumentsFor(cancelledSession, 'Return the child marker.'))
+    expect(afterCancel?.isError ?? false).toBe(false)
+    expect(afterCancel?.content?.[0]?.text).toContain('PET_CHILD_OK')
   } catch (error) {
+    const { stdout, stderr } = pet?.output() ?? { stdout: '', stderr: '' }
     throw new Error(`${error instanceof Error ? error.message : String(error)}\n--- stdout ---\n${stdout}\n--- stderr ---\n${stderr}`, { cause: error })
   } finally {
-    const timer = setTimeout(() => child.kill('SIGKILL'), 10_000)
-    child.kill('SIGTERM')
-    await child
-    clearTimeout(timer)
+    await pet?.stop()
+    rmSync(f.root, { recursive: true, force: true })
+  }
+}, 300_000)
+
+it.skipIf(!built)('starts a scheduled assignment once after restart without occupying its conversation queue in advance', async () => {
+  const f = fixture()
+  let pet: Awaited<ReturnType<typeof startPet>> | undefined
+  const input = {
+    agentSession: 'pet-e2e-scheduled',
+    task: 'Return the child marker.',
+    acceptanceCriteria: 'Check that the output equals PET_CHILD_OK.',
+    expectedReturn: 'Return only the marker.',
+  }
+  const invoke = (target: URL, name: string, args: Record<string, unknown>) => post(target.href, {
+    jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args },
+  }, name)
+  const detail = async (instance: Awaited<ReturnType<typeof startPet>>, id: string): Promise<RecordBody> => {
+    const response = await request('scheduled detail', instance.api(`/pet/api/delegates/${id}`), 3_000, {}, 1)
+    expect(response.status).toBe(200)
+    return await response.json() as RecordBody
+  }
+  try {
+    const first = await startPet(f)
+    pet = first
+    for (const timing of [{},
+      { delaySeconds: 0 },
+      { everySeconds: 0 },
+      { everySeconds: 2, delaySeconds: 1 },
+      { delaySeconds: 1, durationSeconds: 5 },
+      { everySeconds: 2, durationSeconds: 0 },
+      { everySeconds: 2, maxRuns: 1.5 },
+      { delaySeconds: 1, runAt: '2099-01-01T00:00:00Z' },
+      { runAt: '2099-01-01T00:00:00' },
+      { runAt: '2000-01-01T00:00:00Z' },
+    ]) {
+      const invalid = await invoke(first.mcp, 'subagent_schedule', { ...input, ...timing })
+      expect(invalid.json?.result?.isError).toBe(true)
+    }
+    const scheduled = await invoke(first.mcp, 'subagent_schedule', { ...input, delaySeconds: 10 })
+    const receipt = scheduled.json?.result?.structuredContent
+    const { id, scheduledAt } = receipt ?? {}
+    if (id === undefined || scheduledAt === undefined) throw new Error('missing scheduled receipt')
+    expect(receipt?.status).toBe('scheduled')
+    const start = Date.parse(scheduledAt)
+    const initial = await detail(first, id)
+    expect(initial).toMatchObject({ status: 'scheduled', scheduledAt: start, subagents: [] })
+    const immediate = await invoke(first.mcp, 'subagent_delegate', input)
+    expect(immediate.json?.result?.content?.[0]?.text).toContain('PET_CHILD_OK')
+    expect((await detail(first, id)).status).toBe('scheduled')
+    await first.stop()
+    pet = undefined
+
+    const restarted = await startPet(f)
+    pet = restarted
+    await expect.poll(async () => (await detail(restarted, id)).status, { timeout: 20_000 }).toBe('completed')
+    const finished = await detail(restarted, id)
+    expect(finished.mainSessionId).toBe(initial.mainSessionId)
+    expect(finished.subagents).toHaveLength(1)
+    expect(finished.subagents[0]?.startedAt).toBeGreaterThanOrEqual(start)
+    expect(finished.subagents[0]?.output).toBe('PET_CHILD_OK')
+
+    const runAt = new Date(Date.now() + 60_000).toISOString()
+    const absolute = await invoke(restarted.mcp, 'subagent_schedule', { ...input, runAt })
+    expect(absolute.json?.result?.structuredContent).toMatchObject({ status: 'scheduled', scheduledAt: runAt })
+  } finally {
+    await pet?.stop()
+    rmSync(f.root, { recursive: true, force: true })
+  }
+}, 300_000)
+
+it.skipIf(!built)('runs and manages a recurring plan through Pet after the creation call returns', async () => {
+  const f = fixture()
+  let pet: Awaited<ReturnType<typeof startPet>> | undefined
+  const input = {
+    agentSession: 'pet-e2e-recurring',
+    task: 'Return the child marker.',
+    acceptanceCriteria: 'Check the marker equals PET_CHILD_OK.',
+    expectedReturn: 'Return only the marker.',
+    maxSubagents: 1,
+    everySeconds: 2,
+  }
+  const invoke = async (instance: Awaited<ReturnType<typeof startPet>>, name: string, args: Record<string, unknown>) => {
+    const result = await post(instance.mcp.href, {
+      jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args },
+    }, name)
+    expect(result.status).toBe(200)
+    expect(result.json?.result?.isError).not.toBe(true)
+    return result.json?.result?.structuredContent
+  }
+  try {
+    const first = await startPet(f)
+    pet = first
+    const created = await invoke(first, 'subagent_schedule', input)
+    const scheduleId = created?.scheduleId
+    if (scheduleId === undefined) throw new Error('missing recurring schedule receipt')
+    expect(created?.status).toBe('active')
+    expect(typeof created?.nextRunAt).toBe('string')
+    expect(created).not.toHaveProperty('lastRun')
+    const manage = (instance: Awaited<ReturnType<typeof startPet>>, action: string) =>
+      invoke(instance, 'subagent_schedule_manage', { scheduleId, action })
+    let firstId: string | undefined
+    await expect.poll(async () => {
+      const current = await manage(first, 'view')
+      if (current?.lastRun?.status === 'completed') firstId = current.lastRun.id
+      return firstId
+    }, { timeout: 16_000 }).toMatch(/^d-/u)
+    let nextId: string | undefined
+    await expect.poll(async () => {
+      const current = await manage(first, 'view')
+      if (current?.lastRun?.status === 'completed') nextId = current.lastRun.id
+      return nextId !== undefined && nextId !== firstId ? current?.lastRun?.result?.text : undefined
+    }, { timeout: 16_000 }).toBe('PET_CHILD_OK')
+    const historyResponse = await request('recurring history', first.api('/pet/api/history'), 3_000)
+    const history = await historyResponse.json() as { groups: { entries: { id: string; scheduleId?: string }[] }[] }
+    expect(history.groups.flatMap(group => group.entries)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: firstId, scheduleId }),
+      expect.objectContaining({ id: nextId, scheduleId }),
+    ]))
+    expect(await manage(first, 'pause')).toMatchObject({ status: 'paused' })
+    await first.stop()
+    pet = undefined
+
+    const restarted = await startPet(f)
+    pet = restarted
+    const restored = await manage(restarted, 'view')
+    expect(restored).toMatchObject({ status: 'paused' })
+    expect(restored).not.toHaveProperty('nextRunAt')
+    const resumed = await manage(restarted, 'resume')
+    expect(resumed?.status).toBe('active')
+    expect(typeof resumed?.nextRunAt).toBe('string')
+    expect(await manage(restarted, 'stop')).toMatchObject({ status: 'stopped' })
+
+    const bounded = await invoke(restarted, 'subagent_schedule', { ...input, durationSeconds: 6, maxRuns: 1 })
+    const boundedId = bounded?.scheduleId
+    if (boundedId === undefined) throw new Error('missing bounded schedule receipt')
+    expect(bounded).toMatchObject({ status: 'active', maxRuns: 1, runCount: 0 })
+    expect(typeof bounded?.endsAt).toBe('string')
+    await expect.poll(async () => invoke(restarted, 'subagent_schedule_manage', { scheduleId: boundedId, action: 'view' }),
+      { timeout: 16_000 }).toMatchObject({
+      status: 'ended', endReason: 'max_runs', runCount: 1,
+      lastRun: { status: 'completed', result: { text: 'PET_CHILD_OK' } },
+    })
+  } finally {
+    await pet?.stop()
     rmSync(f.root, { recursive: true, force: true })
   }
 }, 300_000)
